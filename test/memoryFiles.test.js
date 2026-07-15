@@ -15,7 +15,7 @@ test("loads ranked memories from project-configured directories", async () => {
     await writeFile(join(first, "close.md"), `---
 name: close-fill
 description: Broker close reconciliation evidence
-tags: [moomoo, close, fill]
+tags: [broker, close, fill]
 ---
 body
 `);
