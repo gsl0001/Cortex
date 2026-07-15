@@ -24,7 +24,7 @@ test("links accepted fixes to deterministic project evidence", async () => {
 
     assert.equal(attachments.every(({ recordId }) => recordId === accepted.recordId), true);
     assert.equal(entities.some(({ entityType }) => entityType === "project"), true);
-    assert.equal(entities.some(({ entityType, canonicalKey }) => entityType === "file" && canonicalKey.endsWith("src\\reconcile.js")), true);
+    assert.equal(entities.some(({ entityType, canonicalKey }) => entityType === "file" && canonicalKey.endsWith(join("src", "reconcile.js"))), true);
     assert.equal(entities.some(({ entityType, canonicalKey }) => entityType === "commit" && canonicalKey === "77eae8e"), true);
     assert.equal(entities.some(({ entityType }) => entityType === "agent"), true);
     assert.deepEqual(new Set(linkTypes), new Set(["belongs_to_project", "changes_file", "fixed_by_commit", "related_to"]));
