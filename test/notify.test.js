@@ -11,8 +11,8 @@ test("loadTelegramChannel reads the claude channel config; missing/partial confi
     assert.equal(loadTelegramChannel(dir), null); // nothing there yet
     await writeFile(join(dir, ".env"), "TELEGRAM_BOT_TOKEN=123:abc\n");
     assert.equal(loadTelegramChannel(dir), null); // token alone is not enough
-    await writeFile(join(dir, "access.json"), JSON.stringify({ dmPolicy: "allowlist", allowFrom: ["5657353623"] }));
-    assert.deepEqual(loadTelegramChannel(dir), { token: "123:abc", chatId: "5657353623" });
+    await writeFile(join(dir, "access.json"), JSON.stringify({ dmPolicy: "allowlist", allowFrom: ["111222333"] }));
+    assert.deepEqual(loadTelegramChannel(dir), { token: "123:abc", chatId: "111222333" });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

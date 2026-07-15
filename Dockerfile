@@ -3,13 +3,13 @@ FROM node:25-slim
 
 WORKDIR /app
 
-# Install dependencies first for better layer caching.
+# Install dependencies first for better layer caching (reproducible from the lockfile).
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --no-audit --no-fund || npm install --omit=dev --no-audit --no-fund
+RUN npm ci --no-audit --no-fund
 
-# App source + build the web UI.
+# App source, build the web UI, then drop dev deps from the runtime image.
 COPY . .
-RUN npm install --no-audit --no-fund && npm run web:build && npm prune --omit=dev
+RUN npm run web:build && npm prune --omit=dev
 
 # Persist the database on a volume so it survives container restarts.
 ENV CORTEX_DB=/data/cortex.sqlite

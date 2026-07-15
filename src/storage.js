@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { assertLinkType } from "./linkTypes.js";
@@ -84,8 +84,12 @@ export function normalizeProjectPath(projectPath) {
   return canonical(resolveGitRoot(resolved));
 }
 
+// Single source of truth for the default DB location: a global, cwd-independent
+// path so the server, the CLI, and the capture hooks all open the SAME database
+// when CORTEX_DB is unset. (A cwd-relative default would split the hub's memory
+// across whatever directory each component happened to run from.)
 export function defaultDbPath() {
-  return resolve(process.env.CORTEX_DB || ".cortex/cortex.sqlite");
+  return resolve(process.env.CORTEX_DB || join(homedir(), ".cortex", "cortex.sqlite"));
 }
 
 // local calendar date, not UTC: at UTC-7 the UTC date flips at 5pm local and

@@ -5,6 +5,7 @@ import { createWriteStream, readFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
+import { normalizeProjectPath } from "./storage.js";
 import { createRunWorktree, removeRunWorktree, hasRemote } from "./worktree.js";
 import { integrateRun, localMerge } from "./integrate.js";
 import { reviewRun } from "./reviewer.js";
@@ -19,11 +20,16 @@ const NO_NOTIFIER = { enabled: false, push: async () => false };
 // the launch chokepoint itself (dispatcher AND direct POST /tasks/:id/launch both come
 // through here). Set CORTEX_NEVER_AUTOPILOT to a comma-separated list of absolute paths.
 export const autopilotKey = (path) => String(path || "").toLowerCase().replaceAll("\\", "/");
+// Key each banned entry through the SAME normalization a task's projectPath gets
+// (resolve + git-root + lowercase), so a subdirectory, trailing separator, or
+// mixed-separator spelling of a protected repo still collapses to the repo root
+// and the guard fires. Keying by raw string would let those variants slip past.
 export const NEVER_AUTOPILOT = new Set(
   (process.env.CORTEX_NEVER_AUTOPILOT || "")
     .split(",")
-    .map((p) => autopilotKey(p.trim()))
-    .filter(Boolean),
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => autopilotKey(normalizeProjectPath(p))),
 );
 
 // Run the model that fits the task's type: heavy-reasoning work gets Opus, mechanical

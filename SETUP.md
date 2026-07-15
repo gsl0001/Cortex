@@ -37,6 +37,8 @@ echo 'export CORTEX_TOKEN="your-long-random-string"' >> ~/.bashrc  # or ~/.zshrc
 setx CORTEX_TOKEN "your-long-random-string"
 ```
 
+`setx` does not affect the current shell — open a new terminal before `npm start`.
+
 Generate a value with `openssl rand -hex 24` (or any password manager).
 
 ## 4. Run

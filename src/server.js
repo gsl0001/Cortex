@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
@@ -74,7 +75,9 @@ const settingKeyAllowed = (key) =>
 function authOk(request) {
   const token = process.env.CORTEX_TOKEN || "";
   if (!token) return false; // default-deny: no configured token means no authenticated callers exist
-  return (request.headers["authorization"] || "") === `Bearer ${token}`;
+  const provided = Buffer.from(request.headers["authorization"] || "");
+  const expected = Buffer.from(`Bearer ${token}`);
+  return provided.length === expected.length && timingSafeEqual(provided, expected);
 }
 
 async function readJson(request) {
@@ -104,7 +107,7 @@ async function readJson(request) {
 
 export function createCortexServer({ hub, agentLauncher = createAgentLauncher({ hub, notifier: createNotifier() }), dispatcher, host = "127.0.0.1", port = 0, allowRemote = false, staticDir = resolve("web/dist") } = {}) {
   if (!allowRemote && !["127.0.0.1", "localhost", "::1"].includes(host)) {
-    throw new Error("Memory Hub server requires a loopback host unless allowRemote is explicit");
+    throw new Error("Cortex server requires a loopback host unless allowRemote is explicit");
   }
   if (allowRemote && !(process.env.CORTEX_TOKEN || "")) {
     throw new Error("allowRemote requires CORTEX_TOKEN to be set");
@@ -318,12 +321,16 @@ export function createCortexServer({ hub, agentLauncher = createAgentLauncher({ 
       // allowRemote guard never fires) and always adds x-forwarded-for; direct local
       // clients don't. Static files and /api/v1/health stay open so a phone can load the
       // SPA (api.js's 401 prompt then collects the token) and see a clear state.
+      // Require auth on reads too whenever the hub is reachable beyond loopback —
+      // either proxied (x-forwarded-for) or bound to a public interface (allowRemote).
+      // Otherwise a direct LAN client (no x-forwarded-for) could read all memory,
+      // project paths, and raw run logs with no token. Loopback-only stays open.
       const proxied = Boolean(request.headers["x-forwarded-for"]);
-      if (proxied && url.pathname.startsWith("/api/") && url.pathname !== "/api/v1/health") {
+      if ((proxied || allowRemote) && url.pathname.startsWith("/api/") && url.pathname !== "/api/v1/health") {
         const token = process.env.CORTEX_TOKEN || "";
         if (!token) {
           recordRejected(process.cwd(), "proxy_no_token", url.pathname);
-          return json(response, 401, { error: { code: "unauthorized", message: "CORTEX_TOKEN must be set before exposing the hub via a proxy" } });
+          return json(response, 401, { error: { code: "unauthorized", message: "CORTEX_TOKEN must be set before exposing the hub beyond loopback" } });
         }
         if (!authOk(request)) {
           recordRejected(process.cwd(), "unauthorized", url.pathname);

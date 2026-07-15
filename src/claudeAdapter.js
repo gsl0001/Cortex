@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createWriteClient } from "./writeClient.js";
 
@@ -81,7 +82,10 @@ export async function installClaudeAdapter({
   const resolvedProject = resolve(projectPath);
   const targetPath = settingsPath || join(resolvedProject, ".claude", "settings.local.json");
   const bin = cortexBin || `node "${resolve("src/cli.js")}"`;
-  const resolvedDbPath = dbPath || join(resolvedProject, ".cortex", "cortex.sqlite");
+  // Default to the global hub DB (matches storage.defaultDbPath), not a per-project
+  // file — the hub is one shared database, so installed hooks must write where the
+  // server reads. Pass dbPath explicitly only for an intentionally isolated DB.
+  const resolvedDbPath = dbPath || join(homedir(), ".cortex", "cortex.sqlite");
   const base = await readSettings(targetPath);
 
   const withSessionStart = mergeHook(base, "SessionStart", {

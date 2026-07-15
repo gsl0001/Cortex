@@ -27,10 +27,10 @@ async function request(method, path, { query, body } = {}) {
       signal: AbortSignal.timeout(5000),
     });
   } catch {
-    throw new Error(`Memory Hub server is unavailable at ${BASE_URL} — start it with npm start.`);
+    throw new Error(`Cortex server is unavailable at ${BASE_URL} — start it with npm start.`);
   }
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload?.error?.message || `Memory Hub request failed (${response.status})`);
+  if (!response.ok) throw new Error(payload?.error?.message || `Cortex request failed (${response.status})`);
   return payload;
 }
 

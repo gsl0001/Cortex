@@ -70,10 +70,10 @@ function contextKeywords(branchStr, files) {
 const keywords = contextKeywords(branch, recentFiles);
 const hub = createCortex({ dbPath: DB_PATH });
 const profile = hub.storage.getProjectProfile(PROJECT_PATH);
-const configuredDirs = process.env.MEMORY_DIRS
-  ? process.env.MEMORY_DIRS.split(delimiter).filter(Boolean)
-  : process.env.MEMORY_DIR
-    ? [process.env.MEMORY_DIR]
+const configuredDirs = process.env.CORTEX_MEMORY_DIRS
+  ? process.env.CORTEX_MEMORY_DIRS.split(delimiter).filter(Boolean)
+  : process.env.CORTEX_MEMORY_DIR
+    ? [process.env.CORTEX_MEMORY_DIR]
     : profile?.externalMemoryDirs || [];
 const relevantMemories = loadRelevantMemories(configuredDirs, keywords);
 const hookPayload = readHookPayload();

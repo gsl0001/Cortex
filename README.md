@@ -45,7 +45,7 @@ cd cortex
 npm install
 
 # Set a write token (any long random string). Writes are refused until this exists.
-export CORTEX_TOKEN="$(openssl rand -hex 24)"   # Windows: setx CORTEX_TOKEN "..."
+export CORTEX_TOKEN="$(openssl rand -hex 24)"   # Windows: setx CORTEX_TOKEN "..." then open a new terminal
 
 npm run web:build
 npm start
@@ -80,7 +80,7 @@ project's `.mcp.json`:
   "mcpServers": {
     "cortex": {
       "command": "node",
-      "args": ["src/mcp.js"],
+      "args": ["/absolute/path/to/cortex/src/mcp.js"],
       "env": {
         "CORTEX_URL": "http://127.0.0.1:4317",
         "CORTEX_TOKEN": "${CORTEX_TOKEN}",
@@ -90,6 +90,9 @@ project's `.mcp.json`:
   }
 }
 ```
+
+Use the **absolute path** to `src/mcp.js` in your Cortex checkout — your agent
+launches this from your project's directory, not Cortex's.
 
 Five tools are exposed: `memory_search`, `memory_remember`, `memory_recall_task`,
 `memory_update_task`, `memory_lesson`.
@@ -149,6 +152,10 @@ setup, agent adapters, and Autopilot details.
   `CORTEX_TOKEN` is set — even on localhost.
 - **Autopilot is fenced.** Agents run in throwaway git worktrees, never your main
   checkout, and repos listed in `CORTEX_NEVER_AUTOPILOT` can never be launched.
+- **Treat `CORTEX_TOKEN` like an SSH key.** Autopilot spawns coding agents and runs
+  task verification commands automatically, so a leaked token means code execution
+  on the host, not just read access. Keep the hub on loopback unless you front it
+  with an authenticating reverse proxy over TLS.
 
 ## Development
 
