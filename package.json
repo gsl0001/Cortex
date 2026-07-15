@@ -1,0 +1,39 @@
+{
+  "name": "cortex",
+  "version": "0.1.0",
+  "description": "A local, SQLite-backed memory and autopilot layer for coding agents (Claude Code, Codex).",
+  "license": "MIT",
+  "type": "module",
+  "keywords": ["ai", "agents", "memory", "claude-code", "codex", "mcp", "sqlite", "autopilot"],
+  "bin": {
+    "cortex": "./src/cli.js"
+  },
+  "scripts": {
+    "test": "node --test",
+    "start": "node src/web.js",
+    "dev": "node dev.js",
+    "web:dev": "vite",
+    "web:build": "vite build",
+    "web:test": "vitest run"
+  },
+  "engines": {
+    "node": ">=25"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "cytoscape": "3.33.1",
+    "react": "19.2.3",
+    "react-dom": "19.2.3"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16.3.1",
+    "@vitejs/plugin-react": "5.1.2",
+    "jsdom": "27.4.0",
+    "vite": "^7.3.5",
+    "vitest": "^4.1.9"
+  },
+  "overrides": {
+    "esbuild": "0.28.1"
+  }
+}

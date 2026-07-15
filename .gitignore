@@ -1,0 +1,12 @@
+node_modules/
+.cortex/
+web/dist/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+.env
+.env.local
+.claude/settings.local.json
+.codex/hooks.json
+.DS_Store

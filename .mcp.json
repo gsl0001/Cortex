@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "cortex": {
+      "command": "node",
+      "args": ["src/mcp.js"],
+      "env": {
+        "CORTEX_URL": "http://127.0.0.1:4317",
+        "CORTEX_TOKEN": "${CORTEX_TOKEN}",
+        "CORTEX_AGENT": "claude-code"
+      }
+    }
+  }
+}

@@ -1,0 +1,10 @@
+node_modules
+web/node_modules
+web/dist
+.cortex
+.git
+.env
+.env.local
+*.sqlite
+*.sqlite-*
+.DS_Store
