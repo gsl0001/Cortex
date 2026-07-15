@@ -15,10 +15,10 @@ It runs entirely on your machine: one Node process, one SQLite file, no external
 services, no data leaving your laptop. It works with **Claude Code** and **Codex**
 out of the box.
 
-```text
-   your agent  ──▶  Cortex hub  ──▶  a memory that gets smarter every session
-  (Claude/Codex)   localhost:4317      + a dashboard + optional autopilot
-```
+![The Cortex command center — blocked work, unresolved questions, and recent captured memory, newest first](docs/dashboard.svg)
+
+> Your agent → the Cortex hub on `localhost:4317` → a memory that gets smarter
+> every session, a command center, and an optional autopilot.
 
 **Contents:** [What it does](#what-it-does) · [How it works](#how-it-works) ·
 [The memory lifecycle](#the-memory-lifecycle) · [Quickstart](#quickstart) ·

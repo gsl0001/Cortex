@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <linearGradient id="logo" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/><stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+  </defs>
+
+  <!-- app background -->
+  <rect width="1280" height="720" fill="#0d0e12"/>
+
+  <!-- ===== sidebar ===== -->
+  <rect x="0" y="0" width="248" height="720" fill="#0a0b0e"/>
+  <line x1="248" y1="0" x2="248" y2="720" stroke="#1c1f27"/>
+  <!-- brand -->
+  <rect x="28" y="30" width="40" height="40" rx="11" fill="url(#logo)"/>
+  <text x="48" y="57" fill="#ffffff" font-size="22" font-weight="700" text-anchor="middle">C</text>
+  <text x="82" y="57" fill="#f5f6f8" font-size="21" font-weight="700">Cortex</text>
+  <line x1="28" y1="92" x2="220" y2="92" stroke="#1c1f27"/>
+  <!-- active nav -->
+  <rect x="20" y="112" width="208" height="46" rx="12" fill="#182031"/>
+  <rect x="20" y="112" width="3" height="46" rx="2" fill="#3b82f6"/>
+  <text x="46" y="140" fill="#3b82f6" font-size="16">▦</text>
+  <text x="72" y="141" fill="#f5f6f8" font-size="16" font-weight="600">Command center</text>
+  <!-- inactive nav -->
+  <g fill="#98a1b1" font-size="16">
+    <text x="46" y="196">☑</text><text x="72" y="197">Control Center</text>
+    <text x="46" y="240">◉</text><text x="72" y="241">Goals</text>
+    <text x="46" y="284">⌕</text><text x="72" y="285">Search</text>
+    <text x="46" y="328">☰</text><text x="72" y="329">Tasks</text>
+    <text x="46" y="372">◉</text><text x="72" y="373">Knowledge graph</text>
+    <text x="46" y="416">▤</text><text x="72" y="417">Activity log</text>
+    <text x="46" y="460">⋯</text><text x="72" y="461">More</text>
+  </g>
+
+  <!-- ===== main ===== -->
+  <text x="300" y="86" fill="#f5f6f8" font-size="42" font-weight="800">Good evening</text>
+  <text x="300" y="120" fill="#8b93a3" font-size="17">Tuesday · Here’s what your memory system needs from you.</text>
+  <circle cx="1120" cy="60" r="5" fill="#22c55e"/>
+  <text x="1134" y="65" fill="#22c55e" font-size="15">System ready</text>
+
+  <!-- search bar -->
+  <rect x="300" y="150" width="952" height="52" rx="12" fill="#12141a" stroke="#262b36"/>
+  <text x="322" y="182" fill="#6b7280" font-size="16">Search memories, decisions, tasks, and runs…</text>
+  <rect x="1176" y="164" width="60" height="24" rx="6" fill="none" stroke="#333a47"/>
+  <text x="1206" y="181" fill="#8b93a3" font-size="12" text-anchor="middle">Ctrl K</text>
+
+  <!-- stat tiles -->
+  <g>
+    <rect x="300" y="222" width="228" height="96" rx="14" fill="#14161c" stroke="#232732"/>
+    <text x="324" y="278" fill="#f5f6f8" font-size="34" font-weight="800">3</text>
+    <text x="324" y="300" fill="#8b93a3" font-size="14">Durable memories</text>
+
+    <rect x="541" y="222" width="228" height="96" rx="14" fill="#14161c" stroke="#232732"/>
+    <text x="565" y="278" fill="#f5f6f8" font-size="34" font-weight="800">6</text>
+    <text x="565" y="300" fill="#8b93a3" font-size="14">Tasks tracked</text>
+
+    <rect x="782" y="222" width="228" height="96" rx="14" fill="#14161c" stroke="#232732"/>
+    <text x="806" y="278" fill="#f5f6f8" font-size="34" font-weight="800">1</text>
+    <text x="806" y="300" fill="#8b93a3" font-size="14">Blocked</text>
+
+    <rect x="1023" y="222" width="229" height="96" rx="14" fill="#14161c" stroke="#232732"/>
+    <text x="1047" y="278" fill="#f59e0b" font-size="34" font-weight="800">4</text>
+    <text x="1047" y="300" fill="#8b93a3" font-size="14">Need attention</text>
+  </g>
+
+  <!-- needs attention -->
+  <rect x="300" y="338" width="588" height="358" rx="14" fill="#14161c" stroke="#232732"/>
+  <text x="324" y="372" fill="#f5f6f8" font-size="17" font-weight="700">Needs your attention</text>
+  <text x="864" y="372" fill="#6b7280" font-size="13" text-anchor="end">Highest impact first</text>
+
+  <g>
+    <!-- item 1 -->
+    <rect x="320" y="392" width="548" height="64" rx="10" fill="#101219" stroke="#20242e"/>
+    <rect x="332" y="410" width="70" height="20" rx="5" fill="#3a2a12"/>
+    <text x="367" y="424" fill="#f59e0b" font-size="11" text-anchor="middle">INBOX</text>
+    <text x="416" y="418" fill="#e8eaee" font-size="14.5">Prioritize the auth bug before the S3 migration.</text>
+    <text x="416" y="440" fill="#6b7280" font-size="12">human · Acme API</text>
+    <rect x="784" y="412" width="72" height="26" rx="7" fill="#1b2f22"/>
+    <text x="820" y="429" fill="#42d392" font-size="12" text-anchor="middle">Resolve</text>
+
+    <!-- item 2 -->
+    <rect x="320" y="466" width="548" height="64" rx="10" fill="#101219" stroke="#20242e"/>
+    <rect x="332" y="484" width="70" height="20" rx="5" fill="#3a2a12"/>
+    <text x="367" y="498" fill="#f59e0b" font-size="11" text-anchor="middle">INBOX</text>
+    <text x="416" y="492" fill="#e8eaee" font-size="14.5">Can we ship the rate-limiter this week?</text>
+    <text x="416" y="514" fill="#6b7280" font-size="12">human · Acme API</text>
+    <rect x="784" y="486" width="72" height="26" rx="7" fill="#1b2f22"/>
+    <text x="820" y="503" fill="#42d392" font-size="12" text-anchor="middle">Resolve</text>
+
+    <!-- item 3 -->
+    <rect x="320" y="540" width="548" height="64" rx="10" fill="#101219" stroke="#20242e"/>
+    <rect x="332" y="558" width="70" height="20" rx="5" fill="#2a2140"/>
+    <text x="367" y="572" fill="#a78bfa" font-size="11" text-anchor="middle">TASK</text>
+    <text x="416" y="566" fill="#e8eaee" font-size="14.5">Migrate uploads to S3 multipart</text>
+    <text x="416" y="588" fill="#6b7280" font-size="12">blocked · feature · Acme API</text>
+    <rect x="784" y="560" width="72" height="26" rx="7" fill="#20242e"/>
+    <text x="820" y="577" fill="#9aa3b2" font-size="12" text-anchor="middle">Open</text>
+
+    <!-- item 4 -->
+    <rect x="320" y="614" width="548" height="64" rx="10" fill="#101219" stroke="#20242e"/>
+    <rect x="332" y="632" width="70" height="20" rx="5" fill="#123043"/>
+    <text x="367" y="646" fill="#38bdf8" font-size="11" text-anchor="middle">AUDIT</text>
+    <text x="416" y="640" fill="#e8eaee" font-size="14.5">Research has neither sources nor evidence.</text>
+    <text x="416" y="662" fill="#6b7280" font-size="12">2 findings · Acme API</text>
+    <rect x="784" y="634" width="72" height="26" rx="7" fill="#20242e"/>
+    <text x="820" y="651" fill="#9aa3b2" font-size="12" text-anchor="middle">Open</text>
+  </g>
+
+  <!-- recent activity -->
+  <rect x="904" y="338" width="348" height="358" rx="14" fill="#14161c" stroke="#232732"/>
+  <text x="928" y="372" fill="#8b93a3" font-size="12" font-weight="700" letter-spacing="1">RECENT ACTIVITY</text>
+  <g font-size="13.5">
+    <text x="928" y="404" fill="#42d392" font-size="11" font-weight="700">FIX</text>
+    <text x="928" y="424" fill="#dfe3ea">Login redirect looped on expired</text>
+    <text x="928" y="442" fill="#dfe3ea">session; cleared stale cookie.</text>
+    <text x="928" y="460" fill="#5b6270" font-size="11">verified · Acme API</text>
+
+    <text x="928" y="494" fill="#42d392" font-size="11" font-weight="700">FIX</text>
+    <text x="928" y="514" fill="#dfe3ea">Export endpoint OOM; streamed</text>
+    <text x="928" y="532" fill="#dfe3ea">rows instead of buffering.</text>
+    <text x="928" y="550" fill="#5b6270" font-size="11">verified · Acme API</text>
+
+    <text x="928" y="584" fill="#a78bfa" font-size="11" font-weight="700">RESEARCH</text>
+    <text x="928" y="604" fill="#dfe3ea">Upstream API caps at 30 req/s;</text>
+    <text x="928" y="622" fill="#dfe3ea">needs token bucket + backoff.</text>
+    <text x="928" y="640" fill="#5b6270" font-size="11">Acme API</text>
+
+    <text x="928" y="674" fill="#f59e0b" font-size="11" font-weight="700">INBOX</text>
+  </g>
+</svg>

@@ -1327,7 +1327,7 @@ export default function App() {
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
       <aside className="app-sidebar">
-        <div className="brand"><span className="logo">M</span><strong className="brand-name">Memory Hub</strong></div>
+        <div className="brand"><span className="logo">C</span><strong className="brand-name">Cortex</strong></div>
         <nav aria-label="Primary">
           {(mobile ? MAIN_VIEWS.slice(0, 5) : MAIN_VIEWS).map((name) => (
             <button
