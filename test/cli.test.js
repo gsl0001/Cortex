@@ -59,3 +59,13 @@ test("roadmap proposal-add with a missing --file fails with a clean message, not
     assert.doesNotMatch(result.err, /ENOENT|"path" argument/);
   });
 });
+
+test("cli --version prints package version", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const path = await import("node:path");
+  const cliPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
+  const r = spawnSync(process.execPath, [cliPath, "--version"], { encoding: "utf8" });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout || "", /cortex\s+\d+/);
+});

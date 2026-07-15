@@ -8,6 +8,16 @@ if (Number(process.versions.node.split(".")[0]) < 25) {
 }
 import { readFileSync } from "node:fs";
 
+
+function printVersion() {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    console.log(`cortex ${pkg.version || "0.0.0"}`);
+  } catch {
+    console.log("cortex 0.0.0");
+  }
+}
+
 function readStdinJson() {
   try {
     const input = readFileSync(0, "utf8").trim();
