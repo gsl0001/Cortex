@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createCortex } from "../src/index.js";
 import { buildAgentCommand, buildTaskGoal, parseAgentEvent, createAgentLauncher, resolveModel, parseUsage, normalizeModelId, usageFromLog, gradeEvidence, memoryGuard, classifyFailure, diffConfinedTo, NEVER_AUTOPILOT, autopilotKey } from "../src/agentLauncher.js";
+import { normalizeProjectPath } from "../src/storage.js";
 
 test("classifyFailure tags auth/transient/permanent/stopped from the failure detail", () => {
   assert.equal(classifyFailure({ stopped: true }), "stopped");
@@ -426,6 +427,42 @@ test("launch refuses tasks in a NEVER_AUTOPILOT repo before claiming them", asyn
     assert.equal(hub.storage.getTask(task.id).status, "ready");
     assert.equal(hub.storage.listRuns(task.projectPath).length, 0);
   });
+});
+
+test("CORTEX_NEVER_AUTOPILOT env string is comma-split, trimmed, and normalized like NEVER_AUTOPILOT itself", () => {
+  // NEVER_AUTOPILOT is a module-level constant computed once at import time from
+  // process.env.CORTEX_NEVER_AUTOPILOT, so it can't be re-derived by mutating
+  // process.env after the module has already loaded. This re-derives the same
+  // pipeline the module uses (split -> trim -> filter -> normalize) against a
+  // controlled input string, rather than the live env var, so the parsing rules
+  // themselves stay covered.
+  //
+  // Paths are placed under os.tmpdir() so normalizeProjectPath skips git-root
+  // resolution entirely (see storage.js's isUnderTmpdir), keeping this
+  // deterministic without depending on any real git repo.
+  const repoA = join(tmpdir(), "Never-Autopilot-Repo-A");
+  const repoB = join(tmpdir(), "never-autopilot-repo-b");
+
+  // Trailing separator (empty final entry) and mixed casing/spacing, exactly
+  // the shape the issue calls out.
+  const envValue = ` ${repoA} , ${repoB.toUpperCase()},`;
+
+  const derive = (raw) =>
+    new Set(
+      (raw || "")
+        .split(",")
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .map((p) => autopilotKey(normalizeProjectPath(p))),
+    );
+
+  const derived = derive(envValue);
+
+  assert.equal(derived.size, 2); // trailing separator produced no 3rd (empty) entry
+  assert.ok(derived.has(autopilotKey(normalizeProjectPath(repoA))));
+  // repoB was uppercased in the env string; autopilotKey lowercases, so it
+  // must still collapse onto the same key as the canonical-case path.
+  assert.ok(derived.has(autopilotKey(normalizeProjectPath(repoB))));
 });
 
 test("stopRun kills a running agent and marks its task Stopped by user", async () => {
