@@ -1,0 +1,64 @@
+<svg width="1280" height="640" viewBox="0 0 1280 640" xmlns="http://www.w3.org/2000/svg" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#161327"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a684f0"/>
+      <stop offset="1" stop-color="#8a63d2"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#8a63d2" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#8a63d2" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <circle cx="1050" cy="150" r="360" fill="url(#glow)"/>
+
+  <!-- node/graph motif, top-right -->
+  <g stroke="#8a63d2" stroke-width="2" opacity="0.55" fill="#a684f0">
+    <line x1="1015" y1="120" x2="1120" y2="90"/>
+    <line x1="1015" y1="120" x2="1105" y2="205"/>
+    <line x1="1120" y1="90" x2="1180" y2="180"/>
+    <line x1="1105" y1="205" x2="1180" y2="180"/>
+    <line x1="1015" y1="120" x2="960" y2="210"/>
+    <circle cx="1015" cy="120" r="11"/>
+    <circle cx="1120" cy="90" r="8"/>
+    <circle cx="1180" cy="180" r="8"/>
+    <circle cx="1105" cy="205" r="8"/>
+    <circle cx="960" cy="210" r="7"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="90" y="150" font-size="86" font-weight="800" fill="#f0f0f5" letter-spacing="-1">Cortex</text>
+  <rect x="92" y="176" width="118" height="6" rx="3" fill="url(#accent)"/>
+
+  <!-- tagline -->
+  <text x="92" y="250" font-size="38" font-weight="600" fill="#c9c6d6">A local memory + autopilot layer for coding agents.</text>
+
+  <!-- sub -->
+  <text x="92" y="308" font-size="25" fill="#8b8898">Persistent memory across sessions for Claude Code &amp; Codex.</text>
+  <text x="92" y="343" font-size="25" fill="#8b8898">One Node process, one SQLite file — nothing leaves your machine.</text>
+
+  <!-- feature chips -->
+  <g font-size="23" font-weight="600">
+    <g>
+      <rect x="92" y="400" width="290" height="58" rx="12" fill="#1c2333" stroke="#2d2a44"/>
+      <text x="118" y="437" fill="#d6d3e0">🧠  Memory that persists</text>
+    </g>
+    <g>
+      <rect x="404" y="400" width="250" height="58" rx="12" fill="#1c2333" stroke="#2d2a44"/>
+      <text x="430" y="437" fill="#d6d3e0">🎛️  Command center</text>
+    </g>
+    <g>
+      <rect x="676" y="400" width="245" height="58" rx="12" fill="#1c2333" stroke="#2d2a44"/>
+      <text x="702" y="437" fill="#d6d3e0">🤖  Optional autopilot</text>
+    </g>
+  </g>
+
+  <!-- footer bar -->
+  <text x="92" y="560" font-size="22" fill="#6f6c7d">MIT · node:sqlite · MCP + hooks + CLI</text>
+  <text x="1188" y="560" font-size="22" font-weight="600" fill="#a684f0" text-anchor="end">github.com/gsl0001/Cortex</text>
+</svg>
