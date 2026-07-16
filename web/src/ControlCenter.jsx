@@ -273,7 +273,7 @@ export default function ControlCenter({ projects }) {
       {/* ---------- Header bar ---------- */}
       <header className="cc-header">
         <div className="cc-brand">
-          <span className="cc-logo" aria-hidden="true">OMH</span>
+          <span className="cc-logo" aria-hidden="true">C</span>
           <span className="cc-brand-text">
             <strong>Autopilot Control</strong>
             <span className="cc-brand-sub">Cortex · agent orchestration</span>

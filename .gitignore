@@ -10,3 +10,4 @@ web/dist/
 .claude/settings.local.json
 .codex/hooks.json
 .DS_Store
+launch-kit.md
