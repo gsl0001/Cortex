@@ -241,8 +241,8 @@ function jaccard(left, right) {
 // Containment (overlap coefficient) rather than jaccard: how much of the SHORTER side is
 // present in the longer one. Re-asking the same question with drifting wording only ever adds
 // words ("…in an app?" → "…in an App Store app?"), so containment pins at 1. Two questions off
-// the same template but about different subjects do not: "Does fomc_pre strategy pass vetting
-// gates?" vs the same for `dabd` contains at 0.83, because each holds a token the other lacks.
+// the same template but about different subjects do not: "Does gapfade_pre strategy pass vetting
+// gates?" vs the same for `meanrev` contains at 0.83, because each holds a token the other lacks.
 export function containment(left, right) {
   if (!left.size || !right.size) return 0;
   let intersection = 0;

@@ -7,8 +7,8 @@ import { buildProjectBrief } from "../src/brief.js";
 
 const PROFILES = [
   { projectPath: "C:/work/cortex", name: "Cortex Ops Hub" },
-  { projectPath: "C:/work/camera_app", name: "Portrait Camera (Sitter)" },
-  { projectPath: "C:/work/sleep", name: "Moonrain (iOS sleep-sound app)" },
+  { projectPath: "C:/work/camera_app", name: "Portrait Camera (Studio)" },
+  { projectPath: "C:/work/sleep", name: "Nighttone (iOS sleep-sound app)" },
   { projectPath: "C:/work/sitelogs", name: "Sitelogs App" },
 ];
 const INDEX = buildProjectIndex(PROFILES);
@@ -43,7 +43,7 @@ test("a record naming another project and never this one is off topic", () => {
     isOffTopic("Portrait device preference is LiDAR then dual-wide", HUB, INDEX),
     true,
   );
-  assert.equal(isOffTopic("Girderlens is the top tested rename for Moonrain", HUB, INDEX), true);
+  assert.equal(isOffTopic("Duskbell is the top tested rename for Nighttone", HUB, INDEX), true);
 });
 
 test("silence is not evidence: a record naming no project at all stays", () => {
@@ -94,7 +94,7 @@ test("a real fix report is unaffected even when it opens conversationally", () =
 
 test("a real result whose verification is legitimately prose survives", () => {
   const result = capture(
-    "Shipped rsi2-broker preset. Sharpe 1.52, WR 75%, PF 2.9 over 24 trades. "
+    "Shipped meanrev-broker preset. Sharpe 1.2, WR 58%, PF 1.9 over 40 trades. "
     + "Verification: 3y backtest + live paper validation.",
   );
   assert.equal(result.type, "fix", "prose verification is still verification for a work report");

@@ -30,14 +30,14 @@ test("catches the same question re-asked, even when the finding is freshly worde
   // 0.82 gate -- because each retelling wrote a different finding body.
   const first = {
     id: "z1",
-    key: "Can copyrighted Hans Zimmer recordings be bundled in an app?",
-    signature: "Can copyrighted Hans Zimmer recordings be bundled in an app? No. Sync and master rights are required and Remote Control Productions does not license them for consumer apps.",
+    key: "Can copyrighted orchestral film-score recordings be bundled in an app?",
+    signature: "Can copyrighted orchestral film-score recordings be bundled in an app? No. Sync and master rights are required and the rights holder does not license them for consumer apps.",
     qualityStatus: "unverified",
   };
   for (const question of [
-    "Can copyrighted Hans Zimmer recordings be bundled in an App Store app?",
-    "Can copyrighted Hans Zimmer recordings be bundled in an App Store iOS app?",
-    "Can copyrighted Hans Zimmer recordings be bundled in an iOS app?",
+    "Can copyrighted orchestral film-score recordings be bundled in an App Store app?",
+    "Can copyrighted orchestral film-score recordings be bundled in an App Store iOS app?",
+    "Can copyrighted orchestral film-score recordings be bundled in an iOS app?",
   ]) {
     const hit = isNearDuplicate(
       { signature: `${question} Bundling them would need both a sync licence and a master-use licence, neither of which is offered.`, key: question },
@@ -50,17 +50,17 @@ test("catches the same question re-asked, even when the finding is freshly worde
 });
 
 test("does not merge template questions that differ only by subject", () => {
-  // Also from the live DB: master asks the same shape about each strategy. These are four
+  // Also from the live DB: a trading project asks the same shape about each strategy. These are four
   // distinct answers and must stay four records. Containment separates them from a rewording --
   // each side holds a token the other lacks, so it lands at 0.83, under the 0.95 bar.
-  const fomc = {
+  const gapfade = {
     id: "s1",
-    key: "Does fomc_pre strategy pass vetting gates?",
-    signature: "Does fomc_pre strategy pass vetting gates? Yes on the entry-offset sweep.",
+    key: "Does gapfade_pre strategy pass vetting gates?",
+    signature: "Does gapfade_pre strategy pass vetting gates? Yes on the entry-offset sweep.",
     qualityStatus: "unverified",
   };
-  const dabd = "Does dabd strategy pass vetting gates?";
-  assert.equal(isNearDuplicate({ signature: `${dabd} No, it fails the phase-robustness check.`, key: dabd }, [fomc]), null);
+  const meanrev = "Does meanrev strategy pass vetting gates?";
+  assert.equal(isNearDuplicate({ signature: `${meanrev} No, it fails the phase-robustness check.`, key: meanrev }, [gapfade]), null);
 });
 
 test("keeps recurring reports apart when only a short number differs", () => {
