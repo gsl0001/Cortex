@@ -21,7 +21,8 @@ out of the box.
 > Your agent → the Cortex hub on `localhost:4317` → a memory that gets smarter
 > every session, a command center, and an evening brief of what actually happened.
 
-**Contents:** [What it does](#what-it-does) · [How it works](#how-it-works) ·
+**Contents:** [What it does](#what-it-does) · [How it compares](#how-it-compares) ·
+[How it works](#how-it-works) ·
 [The memory lifecycle](#the-memory-lifecycle) · [Quickstart](#quickstart) ·
 [Connect your agent](#connect-your-agent) · [Using the system](#using-the-system) ·
 [The dashboard](#the-dashboard) · [Autonomy tiers](#autonomy-tiers) · [CLI reference](#cli-reference) ·
@@ -60,6 +61,31 @@ noise stays down.
 pin (`CORTEX_NEVER_AUTOPILOT`) that locks protected repos at `watch` forever.
 Cortex itself never launches agents; it is the policy and memory surface an
 external runner reads.
+
+---
+
+## How it compares
+
+There are several polished commercial memory layers for AI agents. They're good
+products — the honest difference is *where your data lives* and *what the tool
+is for*:
+
+| | **Cortex** | Mem0 | Zep | Supermemory | Letta |
+|---|---|---|---|---|---|
+| **Price** | Free, MIT | Paid cloud (OSS core) | Paid cloud (community edition) | Paid API | Paid cloud (OSS core) |
+| **Your data lives** | Your machine, one SQLite file | Their cloud (or self-host) | Their cloud (or self-host) | Their cloud | Their cloud (or self-host) |
+| **Needs API keys / embeddings** | No — deterministic local ranking (embeddings optional, via local Ollama) | Yes (LLM + embeddings) | Yes | Yes | Yes (LLM) |
+| **Built for** | Coding agents specifically — hooks into Claude Code / Codex sessions | General AI-app memory | Agent memory / knowledge graph | General memory API | Stateful agent framework |
+| **Beyond memory** | Tasks, roadmaps, evening brief, portfolio doctor, autonomy policy | — | — | — | Agent runtime |
+| **Setup** | `npm install`, `npm start` | SDK + account | SDK + account | SDK + account | SDK + account |
+
+**Pick a paid platform when** you're building a *product* that needs memory for
+thousands of end users, managed scaling, and SLAs.
+
+**Pick Cortex when** the memory is for *you and your coding agents*: your
+codebase context never leaves your laptop, there's no per-request bill, it works
+offline, and you get the project-ops layer (tasks, briefs, autonomy tiers) that
+generic memory APIs don't try to be.
 
 ---
 
@@ -177,23 +203,40 @@ rank forever.
 
 ## Quickstart
 
-Requires **Node.js ≥ 25** (Cortex uses the built-in `node:sqlite` module — no
-native build step, no database to install).
+Five minutes, four steps. The only requirement is **Node.js ≥ 25** (Cortex uses
+the built-in `node:sqlite` module — no database to install, nothing to compile).
+
+**1. Get the code and install:**
 
 ```bash
 git clone https://github.com/gsl0001/Cortex.git cortex
 cd cortex
 npm install
+```
 
-# Set a write token (any long random string). Writes are refused until this exists.
-export CORTEX_TOKEN="$(openssl rand -hex 24)"   # Windows: setx CORTEX_TOKEN "..." then open a new terminal
+**2. Set a write token.** This is just a password you make up — anything long
+and random. Cortex refuses to save anything until it exists:
 
+```bash
+export CORTEX_TOKEN="$(openssl rand -hex 24)"
+```
+
+On Windows: `setx CORTEX_TOKEN "any-long-random-string"`, then open a new
+terminal.
+
+**3. Build the dashboard and start the hub:**
+
+```bash
 npm run web:build
 npm start
 ```
 
-Open **http://127.0.0.1:4317**. The server binds to loopback only and indexes
-your records on startup.
+**4. Open <http://127.0.0.1:4317>** — that's your dashboard. It will be empty;
+that's normal. It fills up as your agents work.
+
+The server only listens on your own machine. Nothing is sent anywhere.
+
+Next: [connect your agent](#connect-your-agent) so sessions start feeding it.
 
 ---
 
