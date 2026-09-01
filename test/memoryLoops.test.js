@@ -29,7 +29,8 @@ test("Stale: correction quarantines the record, removes it from briefs, and reco
   await withHub(async (hub, dir) => {
     const fix = seedFix(hub, dir, "Fixed the retry race in the gate");
     const prefix = fix.recordId.replace(/-/g, "").slice(0, 6);
-    assert.match(hub.buildBrief({ projectPath: dir }).text, /retry race/);
+    const briefContext = { goalText: "debug the retry race in the gate" };
+    assert.match(hub.buildBrief({ projectPath: dir, context: briefContext }).text, /retry race/);
 
     const result = hub.captureCandidate({
       projectPath: dir, agent: "b",
@@ -39,7 +40,7 @@ test("Stale: correction quarantines the record, removes it from briefs, and reco
     assert.equal(hub.storage.getFix(fix.recordId).qualityStatus, "quarantined");
     // gone from the Recent Fixes slots (the correction message itself may echo the phrase
     // elsewhere in the brief, e.g. as the last-session line — that's fine)
-    assert.doesNotMatch(hub.buildBrief({ projectPath: dir }).text, /Recent Fixes:[\s\S]*?retry race/);
+    assert.doesNotMatch(hub.buildBrief({ projectPath: dir, context: briefContext }).text, /Recent Fixes:[\s\S]*?retry race/);
 
     const contradicted = hub.storage.listMetrics(dir, { kind: "recall_contradicted" });
     assert.equal(contradicted.length, 1);
@@ -52,28 +53,78 @@ test("Stale: correction quarantines the record, removes it from briefs, and reco
   });
 });
 
-test("brief footer teaches the Stale: verb", async () => {
+test("brief footer teaches the Stale: verb only when citable records packed", async () => {
   await withHub(async (hub, dir) => {
-    assert.match(hub.buildBrief({ projectPath: dir }).text, /Stale: \[m:xxxxxx\]/);
+    // no citable memory in the brief -> the ~85-token contract yields to a one-line hint (audit V)
+    const empty = hub.buildBrief({ projectPath: dir, context: { goalText: "something entirely unrelated" } });
+    assert.doesNotMatch(empty.text, /Stale: \[m:xxxxxx\]/);
+    assert.match(empty.text, /memory_search/);
+    // with a [m:xxxxxx] id on offer, the full contract rides
+    seedFix(hub, dir, "Fixed the retry race in the gate");
+    const withRecords = hub.buildBrief({ projectPath: dir, context: { goalText: "debug the retry race in the gate" } });
+    assert.match(withRecords.text, /Stale: \[m:xxxxxx\]/);
   });
 });
 
-// ---- fix #4: machine-wide lessons surface in every project's brief ----
+// ---- audit III: lessons are dropped from the brief (0/70 ever cited, one-template
+// monoculture) but stay stored and are still served on first-touch by JIT recall ----
 
-test("a 'machine'-scoped lesson appears in every registered project's brief", async () => {
+test("lessons are stored but no longer injected into the brief", async () => {
   await withHub(async (hub, dir) => {
     hub.addLesson({ projectPath: "machine", lesson: "claude CLI OAuth expiry breaks headless runs; only an interactive /login recovers." });
     const brief = hub.buildBrief({ projectPath: dir });
-    assert.match(brief.text, /Machine-wide Lessons:/);
-    assert.match(brief.text, /OAuth expiry breaks headless runs/);
-    // the reserved scope is stored literally, never resolved against cwd
+    // dropped from the brief entirely — neither a Lessons heading nor the statement text
+    assert.doesNotMatch(brief.text, /Lessons:/);
+    assert.doesNotMatch(brief.text, /OAuth expiry breaks headless runs/);
+    // still stored (the reserved scope is stored literally, never resolved against cwd) so
+    // JIT recall (jit-recall.js) can still serve it on first touch of a matching file
     assert.equal(hub.storage.listLessons("machine").length, 1);
   });
 });
 
-test("no Machine-wide Lessons section when none exist (no permanent noise line)", async () => {
+// ---- audit III: recall_useful is project-scoped so cross-project path collisions
+// (a sibling repo's Core/Foo.swift stored under this project) stop inflating the metric ----
+
+test("recall_useful ignores an injected fix that belongs to another project", async () => {
   await withHub(async (hub, dir) => {
-    assert.doesNotMatch(hub.buildBrief({ projectPath: dir }).text, /Machine-wide Lessons:/);
+    // the last brief surfaced a fix whose id belongs to a DIFFERENT project but lists the same
+    // relative path — the exact collision that inflated the honest-usefulness kill metric
+    hub.storage.recordMetric("recall_injected", dir, {
+      injectedFilesChanged: ["src/gate.js"],
+      injectedFixes: [{ id: "cross", projectPath: "C:/work/other", filesChanged: ["src/gate.js"] }],
+    });
+    await seedFix(hub, dir, "Reworked the gate", "src/gate.js");
+    assert.equal(hub.storage.listMetrics(dir, { kind: "recall_useful" }).length, 0);
+  });
+});
+
+test("recall_useful still fires for a same-project injected fix on the same file", async () => {
+  await withHub(async (hub, dir) => {
+    hub.storage.recordMetric("recall_injected", dir, {
+      injectedFilesChanged: ["src/gate.js"],
+      injectedFixes: [{ id: "same", projectPath: dir, filesChanged: ["src/gate.js"] }],
+    });
+    await seedFix(hub, dir, "Reworked the gate", "src/gate.js");
+    assert.equal(hub.storage.listMetrics(dir, { kind: "recall_useful" }).length, 1);
+  });
+});
+
+// ---- audit III: the session goal gates which fixes the brief admits, so an irrelevant
+// record can't ride into the session as distractor payload ----
+
+test("relevance gate: the session goal admits matching fixes and drops unrelated ones", async () => {
+  await withHub(async (hub, dir) => {
+    await seedFix(hub, dir, "Fixed the paywall subscription gate", "src/paywall.js");
+    await seedFix(hub, dir, "Corrected audio engine loudness trim", "src/audio.js");
+    // cold session (no goal/branch/file signal): minimal brief, memory withheld (audit V)
+    const cold = hub.buildBrief({ projectPath: dir }).text;
+    assert.doesNotMatch(cold, /paywall subscription/);
+    assert.doesNotMatch(cold, /audio engine loudness/);
+    assert.match(cold, /memory withheld/);
+    // a paywall-focused session: the unrelated audio fix is admit-filtered out of the brief
+    const focused = hub.buildBrief({ projectPath: dir, context: { goalText: "work on the paywall refactor" } }).text;
+    assert.match(focused, /paywall subscription/);
+    assert.doesNotMatch(focused, /audio engine loudness/);
   });
 });
 
@@ -172,6 +223,31 @@ test("short transcripts are skipped without a model call", async () => {
   });
 });
 
+test("transient model outages retry after an hour; hard errors stay dead", async () => {
+  await withHub(async (hub, dir) => {
+    const transcript = join(dir, "t3.jsonl");
+    await writeFile(transcript, Array.from({ length: 12 }, (_, i) => transcriptLine(`assistant turn ${i}`)).join("\n"));
+    hub.storage.enqueueDistillJob({ projectPath: dir, transcriptPath: transcript, agent: "a" });
+
+    const downModel = () => {
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.stdin = new PassThrough();
+      setImmediate(() => child.emit("close", 1));
+      return child;
+    };
+    assert.equal(await runNextDistillJob(hub, { spawnImpl: downModel }), "error");
+    assert.equal(hub.storage.nextDistillJob(), null, "errored job cools down before retrying");
+    const later = new Date(Date.now() + 2 * 3_600_000);
+    const retry = hub.storage.nextDistillJob(later);
+    assert.ok(retry, "transient error retries once the cooldown passes");
+
+    // a hard error (thrown mid-job) is not retried, even after the cooldown
+    hub.storage.finishDistillJob(retry.id, { status: "error", error: "boom" });
+    assert.equal(hub.storage.nextDistillJob(later), null);
+  });
+});
+
 test("distillation can be disabled and never enqueues twice for one transcript", async () => {
   await withHub(async (hub, dir) => {
     const transcript = join(dir, "t2.jsonl");
@@ -194,7 +270,8 @@ test("JIT note fires once per session for a repeat-offender file, with a citable
   await withHub(async (hub, dir) => {
     seedFix(hub, dir, "Fixed ordering bug in the gate");
     seedFix(hub, dir, "Corrected overflow handling in validation");
-    const note = buildJitNote(hub.storage, { projectPath: dir, filePath: "deep/nested/gate.js", sessionId: "s-1" });
+    // absolute editor path whose dir/base suffix matches the stored src/gate.js history
+    const note = buildJitNote(hub.storage, { projectPath: dir, filePath: "C:/repo/src/gate.js", sessionId: "s-1" });
     assert.match(note, /editing gate\.js: 2 prior fix/);
     assert.match(note, /\[m:[0-9a-f]{6}\]/);
     // same session, same file: silent the second time

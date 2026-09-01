@@ -116,7 +116,7 @@ test("flags files that recur across fixes, blocked tasks, and lessons as fragile
     assert.ok(warning, "audit surfaces a fragile_file issue");
     assert.match(warning.message, /src\/storage\.js/);
 
-    const brief = hub.buildBrief({ projectPath: project });
+    const brief = hub.buildBrief({ projectPath: project, context: { goalText: "storage path casing" } });
     assert.match(brief.text, /Fragile Files/);
     assert.match(brief.text, /src\/storage\.js/);
   } finally {

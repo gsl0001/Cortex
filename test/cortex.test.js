@@ -121,6 +121,60 @@ test("tracks workflow tasks through claim and done states", async () => {
   });
 });
 
+test("only human sign-off or the auto-merge tier may set a task to done", async () => {
+  await withHub(async (hub, projectPath) => {
+    const task = hub.addTask({ type: "research", projectPath, title: "value-audit deep review" });
+    hub.claimTask({ id: task.id, agent: "claude-code", branch: "b" });
+
+    // an autonomous agent that identifies itself may not complete — clear error, task untouched
+    assert.throws(
+      () => hub.completeTask({ id: task.id, agent: "claude-code", evidence: "I say it's done" }),
+      /may not set a task to 'done'/,
+    );
+    // parking in review is the only finish an agent gets
+    const parked = hub.reviewTask({ id: task.id, evidence: "not completed; parked for sign-off" });
+    assert.equal(parked.status, "review");
+
+    // editing straight to done is a completion too, and is equally blocked for an agent
+    assert.throws(
+      () => hub.editTask({ id: task.id, agent: "claude-code", status: "done" }),
+      /may not set a task to 'done'/,
+    );
+    assert.equal(hub.storage.getTask(task.id).status, "review");
+
+    // human sign-off completes
+    const done = hub.completeTask({ id: task.id, agent: "human", evidence: "approved" });
+    assert.equal(done.status, "done");
+  });
+});
+
+test("agent-named completion always parks in review; capture narration cannot finish a task", async () => {
+  await withHub(async (hub, projectPath) => {
+    // an agent naming itself can never complete a task — only humans sign off
+    const chore = hub.addTask({ type: "chore", projectPath, title: "bump lint config" });
+    hub.reviewTask({ id: chore.id, evidence: "green" });
+    assert.throws(
+      () => hub.completeTask({ id: chore.id, agent: "claude-code", evidence: "self-approved" }),
+      /may not set a task to 'done'/,
+    );
+    assert.equal(hub.storage.getTask(chore.id).status, "review");
+
+    // capture path: an agent narrating "Task X is done" must clamp to review, not silently finish
+    const research = hub.addTask({ type: "research", projectPath, title: "audit noise" });
+    hub.reviewTask({ id: research.id, evidence: "parked" });
+    const captured = hub.captureCandidate({ projectPath, agent: "claude-code", message: `Task ${research.id} is done: verified npm test` });
+    assert.equal(captured.action, "accepted");
+    assert.equal(hub.storage.getTask(research.id).status, "review");
+    // the completion detail is preserved as review evidence for the human
+    assert.match(hub.storage.getTask(research.id).evidence, /verified npm test/);
+
+    // a human-authored capture may still complete
+    const humanTask = hub.addTask({ type: "research", projectPath, title: "human closes" });
+    hub.captureCandidate({ projectPath, agent: "human", message: `Task ${humanTask.id} is done: reviewed and approved` });
+    assert.equal(hub.storage.getTask(humanTask.id).status, "done");
+  });
+});
+
 test("leaving 'blocked' clears the stale block reason", async () => {
   await withHub(async (hub, projectPath) => {
     const task = hub.addTask({ type: "chore", projectPath, title: "Flaky migration" });
@@ -182,7 +236,7 @@ test("builds compact coordination brief with profile, tasks, sessions, research,
   await withHub(async (hub, projectPath) => {
     hub.upsertProjectProfile({
       projectPath,
-      name: "SPY Master",
+      name: "Alpha Project",
       mode: "paper-trading ops",
       summary: "Audit logs, DB, and orchestrator state before changing live behavior.",
       standardCommands: ["python scripts/eod_audit.py YYYY-MM-DD"],
@@ -218,7 +272,7 @@ test("builds compact coordination brief with profile, tasks, sessions, research,
       verification: "817 passed, 2 skipped",
     });
 
-    const brief = hub.buildBrief({ projectPath });
+    const brief = hub.buildBrief({ projectPath, context: { goalText: "audit reconciliation health snapshot before changes" } });
 
     assert.match(brief.text, /paper-trading ops/);
     assert.match(brief.text, /Review orphan recorded trade reconciliation/);
@@ -245,7 +299,7 @@ test("deleteTask refuses active runs and removes an idle task", async () => {
     assert.deepEqual(hub.deleteTask({ id: idle.id, agent: "human" }), { id: idle.id, deleted: true });
 
     const active = hub.addTask({ type: "chore", projectPath: dir, title: "Active", status: "ready" });
-    hub.startRun({ taskId: active.id, agent: "codex" });
+    hub.storage.startRun({ taskId: active.id, agent: "codex" });
     assert.throws(() => hub.deleteTask({ id: active.id, agent: "human" }), /unfinished run/i);
   });
 });

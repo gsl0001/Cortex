@@ -60,7 +60,7 @@ test("flushCodexStop captures the final message through the shared gate", async 
     await writeFile(file, ROLLOUT);
     const accepted = await flushCodexStop(hub, { hook_event_name: "Stop", cwd: dir, transcript_path: file }, { client: offlineClient });
     assert.equal(accepted.reason, "accepted_fix");
-    assert.match(hub.buildBrief({ projectPath: dir }).text, /retry backoff/);
+    assert.match(hub.buildBrief({ projectPath: dir, context: { goalText: "retry backoff" } }).text, /retry backoff/);
 
     // empty/unknown session -> nothing captured, no throw
     const empty = await flushCodexStop(hub, { hook_event_name: "Stop", cwd: dir, session_id: "does-not-exist" }, { client: offlineClient });
@@ -70,7 +70,7 @@ test("flushCodexStop captures the final message through the shared gate", async 
 
 test("duplicate Codex SessionStart ids open once and Stop closes the root session", async () => {
   await withProject(async ({ dir, hub }) => {
-    createClaudeHookContext(hub, {
+    await createClaudeHookContext(hub, {
       hook_event_name: "SessionStart",
       cwd: dir,
       session_id: "codex-sess-1",
@@ -82,9 +82,9 @@ test("duplicate Codex SessionStart ids open once and Stop closes the root sessio
     assert.equal(active[0].id, "codex-sess-1");
     assert.equal(active[0].agent, "codex");
     assert.equal(active[0].source, "codex-session-hook");
-    assert.match(hub.buildBrief({ projectPath: dir }).text, /Active Agent Sessions[\s\S]*codex/);
+    assert.match(hub.buildBrief({ projectPath: dir, context: { branch: "feat/x" } }).text, /Active Agent Sessions[\s\S]*codex/);
 
-    createClaudeHookContext(hub, {
+    await createClaudeHookContext(hub, {
       hook_event_name: "SessionStart",
       cwd: dir,
       session_id: "codex-worker-1",
@@ -111,7 +111,7 @@ test("flush stores a truncated outcome on the finished Codex session", async () 
   await withProject(async ({ dir, hub }) => {
     const file = join(dir, "rollout.jsonl");
     await writeFile(file, ROLLOUT);
-    createClaudeHookContext(hub, {
+    await createClaudeHookContext(hub, {
       hook_event_name: "SessionStart", cwd: dir, session_id: "codex-out-1", agent_type: "codex",
     });
     await flushCodexStop(hub, {

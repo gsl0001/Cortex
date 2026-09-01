@@ -147,10 +147,8 @@ export default function CommandCenter({ projectPath, projects = [], onNavigate }
     tasks: "/tasks",
     inbox: `/inbox?project=${project}`,
     activity: `/activity-log?limit=300`,
-    workflows: "/workflows",
     health: "/health",
     audit: `/audit?project=${project}`,
-    runs: "/runs",
   };
 
   function loadPanel(name) {
@@ -199,9 +197,7 @@ export default function CommandCenter({ projectPath, projects = [], onNavigate }
   const inbox = panels.inbox?.data || [];
   const audit = panels.audit?.data?.issues || [];
   const activity = panels.activity?.data || [];
-  const runs = panels.runs?.data || [];
   const actions = attentionItems({ inbox, tasks, audit });
-  const runningAgents = runs.filter((run) => run.status === "running").length;
 
   const projectName = (path) => projects.find((p) => p.projectPath === path)?.name || path?.split(/[\\/]/).pop() || "—";
 
@@ -229,15 +225,30 @@ export default function CommandCenter({ projectPath, projects = [], onNavigate }
           {panels.health?.data?.ok ? "● System ready" : panels.health?.error ? "● Server unreachable" : "● Connecting…"}
         </span>
       </section>
-      <button className="command-search" type="button" onClick={() => onNavigate?.("Search")}>Search memories, decisions, tasks, and runs… <kbd>Ctrl K</kbd></button>
+      <button className="command-search" type="button" onClick={() => onNavigate?.("Search")}>Search memories, decisions, and tasks…</button>
 
       <MemoryPulse rows={activity} onNavigate={onNavigate} />
 
       <section className="command-metrics" aria-label="System summary">
         <article><strong>{stats?.records?.fix ?? "—"}</strong><span>Durable memories</span></article>
         <article><strong>{tasks.filter((item) => item.status === "in_progress").length}</strong><span>Active tasks</span></article>
-        <article><strong>{runningAgents}</strong><span>Agents running now</span></article>
         <article className="metric-attention"><strong>{actions.length}</strong><span>Need attention</span></article>
+        {/* Recall economics (Aug-31 audit readout): attribution-corrected cost vs the ≤5,000 ceiling */}
+        <article
+          className={Number(stats?.tokensPerDistinctCitation) > 5000 ? "metric-attention" : undefined}
+          title="Injected brief tokens per distinct, resolved citation — audit ceiling 5,000"
+        >
+          <strong>{stats?.tokensPerDistinctCitation != null ? stats.tokensPerDistinctCitation.toLocaleString() : "—"}</strong>
+          <span>Tokens / citation</span>
+        </article>
+        <article title="Citations traced to a record actually served in this project's brief">
+          <strong>{stats?.recallCitedBriefSourced ?? "—"}</strong>
+          <span>Brief-sourced cites</span>
+        </article>
+        <article title="Full records pulled by [m:id] via memory_get — the stub brief's usage signal">
+          <strong>{stats?.recallPulledCount ?? "—"}</strong>
+          <span>Stub pulls</span>
+        </article>
       </section>
 
       <div className="command-columns">

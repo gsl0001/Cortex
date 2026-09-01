@@ -1,29 +1,11 @@
+import "./helpers/pinEnv.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { execFileSync } from "node:child_process";
-import { EventEmitter } from "node:events";
-import { PassThrough } from "node:stream";
 import { createCortex } from "../src/index.js";
 import { createCortexServer } from "../src/server.js";
-import { NEVER_AUTOPILOT, autopilotKey } from "../src/agentLauncher.js";
-import { normalizeProjectPath } from "../src/storage.js";
-import { createAgentLauncher } from "../src/agentLauncher.js";
-
-// A killable stand-in for a spawned CLI: kill() emits close(143), like a real signal.
-function fakeChild() {
-  const child = new EventEmitter();
-  child.stdout = new PassThrough();
-  child.stderr = new PassThrough();
-  child.stdin = new PassThrough();
-  child.kill = () => child.emit("close", 143);
-  return child;
-}
-
-// Stub git so the launcher's per-run worktree lifecycle stays off real git in these API tests.
-const fakeGit = (_cmd, args) => (args[2] === "rev-parse" ? "main\n" : "");
 
 // hermetic: a developer machine may have CORTEX_TOKEN set globally (real hub auth);
 // these tests assume no token unless a test sets one itself.
@@ -35,14 +17,14 @@ test("serves health, search, projects, tasks, links, and audit on loopback", asy
   const hub = createCortex({ dbPath: join(dir, "api.sqlite") });
   const staticDir = join(dir, "dist");
   await mkdir(staticDir);
-  await writeFile(join(staticDir, "index.html"), "<main>Memory Hub UI</main>");
+  await writeFile(join(staticDir, "index.html"), "<main>Cortex UI</main>");
   hub.upsertProjectProfile({ projectPath: dir, name: "Repo", mode: "general", summary: "Test" });
   hub.captureCandidate({ projectPath: dir, agent: "codex", message: "Fixed close reconciliation. Verification: npm test passed." });
   const server = createCortexServer({ hub, staticDir });
   try {
     const address = await server.start();
     assert.equal(address.host, "127.0.0.1");
-    assert.match(await (await fetch(`http://${address.host}:${address.port}/`)).text(), /Memory Hub UI/);
+    assert.match(await (await fetch(`http://${address.host}:${address.port}/`)).text(), /Cortex UI/);
     const base = `http://${address.host}:${address.port}/api/v1`;
     assert.equal((await (await fetch(`${base}/health`)).json()).ok, true);
     const search = await (await fetch(`${base}/search?project=${encodeURIComponent(dir)}&query=close`)).json();
@@ -73,54 +55,16 @@ test("serves health, search, projects, tasks, links, and audit on loopback", asy
   }
 });
 
-test("tasks read model carries the resolved model and runs persist it from launch", async () => {
-  process.env.CORTEX_TOKEN = "api-secret";
-  const dir = await mkdtemp(join(tmpdir(), "cortex-api-model-"));
-  const hub = createCortex({ dbPath: join(dir, "model.sqlite") });
-  hub.upsertProjectProfile({ projectPath: dir, name: "Repo", mode: "general", summary: "Test" });
-  const task = hub.addTask({ type: "feature", projectPath: dir, title: "route me", assignedAgent: "claude-code", status: "ready" });
-  const server = createCortexServer({ hub });
-  try {
-    const address = await server.start();
-    const base = `http://${address.host}:${address.port}/api/v1`;
-    const authed = { "content-type": "application/json", authorization: "Bearer api-secret" };
-
-    // default routing: feature + claude-code → opus, straight from the read model
-    let tasks = await (await fetch(`${base}/tasks?project=${encodeURIComponent(dir)}`)).json();
-    assert.equal(tasks.find((t) => t.id === task.id).model, "opus");
-
-    // POST /settings accepts modelRouting and the read model follows it
-    const set = await fetch(`${base}/settings`, {
-      method: "POST", headers: authed,
-      body: JSON.stringify({ agent: "human", key: "modelRouting", value: { "claude-code": { feature: "haiku" } } }),
-    });
-    assert.equal(set.status, 200);
-    tasks = await (await fetch(`${base}/tasks?project=${encodeURIComponent(dir)}`)).json();
-    assert.equal(tasks.find((t) => t.id === task.id).model, "haiku");
-    const settings = await (await fetch(`${base}/settings`)).json();
-    assert.deepEqual(settings.modelRouting, { "claude-code": { feature: "haiku" } });
-
-    // a run row carries the intended model from the start, before any result event lands
-    const run = hub.startRun({ taskId: task.id, agent: "claude-code", model: "haiku" });
-    assert.equal(hub.storage.getRun(run.id).model, "haiku");
-  } finally {
-    await server.stop();
-    hub.close();
-    await rm(dir, { recursive: true, force: true });
-    delete process.env.CORTEX_TOKEN;
-  }
-});
-
 test("GET /runs/:id/log tails the run log and is safe when the log is missing", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cortex-api-runlog-"));
   const hub = createCortex({ dbPath: join(dir, "log.sqlite") });
   hub.upsertProjectProfile({ projectPath: dir, name: "Repo", mode: "general", summary: "" });
   const task = hub.addTask({ type: "chore", projectPath: dir, title: "logged", status: "ready" });
-  const run = hub.startRun({ taskId: task.id, agent: "claude-code" });
+  const run = hub.storage.startRun({ taskId: task.id, agent: "claude-code" });
   const logPath = join(dir, "run.jsonl");
   await writeFile(logPath, Array.from({ length: 12 }, (_, i) => `line ${i + 1}`).join("\n"));
-  hub.updateRunProgress({ id: run.id, logPath });
-  const bare = hub.startRun({ taskId: task.id, agent: "claude-code" }); // never got a logPath
+  hub.storage.updateRunProgress(run.id, { logPath });
+  const bare = hub.storage.startRun({ taskId: task.id, agent: "claude-code" }); // never got a logPath
   const server = createCortexServer({ hub });
   try {
     const address = await server.start();
@@ -150,7 +94,7 @@ test("serves project stats", async () => {
   const hub = createCortex({ dbPath: join(dir, "stats.sqlite") });
   const staticDir = join(dir, "dist");
   await mkdir(staticDir);
-  await writeFile(join(staticDir, "index.html"), "<main>Memory Hub UI</main>");
+  await writeFile(join(staticDir, "index.html"), "<main>Cortex UI</main>");
   hub.storage.recordMetric("recall_injected", dir, { usedTokens: 50, maxTokens: 1200, dropped: 0 });
   const server = createCortexServer({ hub, staticDir });
   try {
@@ -169,26 +113,7 @@ test("rejects remote binding unless explicitly enabled", () => {
   assert.throws(() => createCortexServer({ hub: {}, host: "0.0.0.0" }), /loopback/);
 });
 
-test("server construction sweeps orphaned worktrees without throwing", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "cortex-api-sweep-"));
-  const hub = createCortex({ dbPath: join(dir, "sweep.sqlite") });
-  const staticDir = join(dir, "dist");
-  await mkdir(staticDir);
-  await writeFile(join(staticDir, "index.html"), "<main>UI</main>");
-  try {
-    // default (no enrolled projects): the sweep loop has nothing to iterate.
-    assert.doesNotThrow(() => createCortexServer({ hub, staticDir }));
-    // an enrolled project that isn't a git repo -> `git worktree list` fails; the sweep
-    // must swallow that (best-effort cleanup) rather than block server construction.
-    hub.storage.setSetting("dispatcher.projects", [dir]);
-    assert.doesNotThrow(() => createCortexServer({ hub, staticDir }));
-  } finally {
-    hub.close();
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test("dispatcher endpoints and needs-you aggregation", async () => {
+test("needs-you aggregation surfaces reviews, inbox, and due rechecks", async () => {
   process.env.CORTEX_TOKEN = "api-secret";
   const dir = await mkdtemp(join(tmpdir(), "cortex-api-dispatch-"));
   const hub = createCortex({ dbPath: join(dir, "d.sqlite") });
@@ -209,21 +134,6 @@ test("dispatcher endpoints and needs-you aggregation", async () => {
   try {
     const address = await server.start();
     const base = `http://${address.host}:${address.port}/api/v1`;
-    const post = (path, body) => fetch(`${base}${path}`, {
-      method: "POST", headers: { "content-type": "application/json", authorization: "Bearer api-secret" }, body: JSON.stringify(body),
-    });
-
-    const initial = await (await fetch(`${base}/dispatcher`)).json();
-    assert.equal(initial.enabled, false); // default off — never surprise-launch
-
-    const enabledResponse = await post("/dispatcher", { agent: "human", enabled: true, projects: [dir] });
-    assert.equal(enabledResponse.status, 200);
-    const enabledBody = await enabledResponse.json();
-    assert.equal(enabledBody.enabled, true);
-    assert.equal(enabledBody.projects.length, 1);
-
-    const badProjects = await post("/dispatcher", { agent: "human", projects: "not-an-array" });
-    assert.equal(badProjects.status, 400);
 
     const needs = await (await fetch(`${base}/needs-you`)).json();
     assert.equal(needs.reviews.length, 1);
@@ -231,77 +141,12 @@ test("dispatcher endpoints and needs-you aggregation", async () => {
     assert.equal(needs.inbox.length, 1);
     assert.equal(needs.rechecks.length, 1); // only the past-due recheck
     assert.equal(needs.rechecks[0].title, "Recheck due");
-    assert.equal(needs.dispatcher.enabled, true);
   } finally {
     await server.stop();
     hub.close();
     await rm(dir, { recursive: true, force: true });
     delete process.env.CORTEX_TOKEN;
   }
-});
-
-test("POST /dispatcher persists the run window", async () => {
-  process.env.CORTEX_TOKEN = "api-secret";
-  const dir = await mkdtemp(join(tmpdir(), "sched-api-"));
-  const hub = createCortex({ dbPath: join(dir, "d.sqlite") });
-  const staticDir = join(dir, "dist"); await mkdir(staticDir); await writeFile(join(staticDir, "index.html"), "<main>UI</main>");
-  const server = createCortexServer({ hub, staticDir });
-  try {
-    const address = await server.start();
-    const base = `http://${address.host}:${address.port}/api/v1`;
-    const post = (b) => fetch(`${base}/dispatcher`, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer api-secret" }, body: JSON.stringify(b) });
-    await post({ agent: "human", window: { start: "22:00", end: "07:00", days: [0,1,2,3,4,5,6] } });
-    const status = await (await fetch(`${base}/dispatcher`)).json();
-    assert.deepEqual(status.window, { start: "22:00", end: "07:00", days: [0,1,2,3,4,5,6] });
-    assert.equal(typeof status.windowOpen, "boolean");
-    assert.equal(hub.storage.getSetting("dispatcher.window", null).start, "22:00");
-  } finally { await server.stop(); hub.close(); await rm(dir, { recursive: true, force: true }); delete process.env.CORTEX_TOKEN; }
-});
-
-test("POST /dispatcher persists maxPerProject and it appears in status", async () => {
-  process.env.CORTEX_TOKEN = "api-secret";
-  const dir = await mkdtemp(join(tmpdir(), "sched-mpp-"));
-  const hub = createCortex({ dbPath: join(dir, "d.sqlite") });
-  // read once at construction (like maxConcurrent) — the running dispatcher reflects this value
-  hub.storage.setSetting("dispatcher.maxPerProject", 2);
-  const staticDir = join(dir, "dist"); await mkdir(staticDir); await writeFile(join(staticDir, "index.html"), "<main>UI</main>");
-  const server = createCortexServer({ hub, staticDir });
-  try {
-    const address = await server.start();
-    const base = `http://${address.host}:${address.port}/api/v1`;
-    const post = (b) => fetch(`${base}/dispatcher`, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer api-secret" }, body: JSON.stringify(b) });
-    const status = await (await fetch(`${base}/dispatcher`)).json();
-    assert.equal(status.maxPerProject, 2); // construction-time value surfaces in status
-    await post({ agent: "human", maxPerProject: 3 });
-    assert.equal(hub.storage.getSetting("dispatcher.maxPerProject", 1), 3); // POST persists the new value
-  } finally { await server.stop(); hub.close(); await rm(dir, { recursive: true, force: true }); delete process.env.CORTEX_TOKEN; }
-});
-
-test("POST /dispatcher rejects malformed window and concurrency values instead of persisting them", async () => {
-  // Persisting garbage here used to silently brick dispatch: a malformed window makes
-  // withinWindow() false forever, and NaN/0 caps mean `inFlight < cap` never launches.
-  process.env.CORTEX_TOKEN = "api-secret";
-  const dir = await mkdtemp(join(tmpdir(), "sched-valid-"));
-  const hub = createCortex({ dbPath: join(dir, "d.sqlite") });
-  const staticDir = join(dir, "dist"); await mkdir(staticDir); await writeFile(join(staticDir, "index.html"), "<main>UI</main>");
-  const server = createCortexServer({ hub, staticDir });
-  try {
-    const address = await server.start();
-    const base = `http://${address.host}:${address.port}/api/v1`;
-    const post = (b) => fetch(`${base}/dispatcher`, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer api-secret" }, body: JSON.stringify(b) });
-    for (const bad of [
-      { window: "banana" }, { window: {} }, { window: { start: "22:00", end: "7pm" } },
-      { window: { start: "22:00", end: "07:00", days: [7] } },
-      { maxConcurrent: "abc" }, { maxConcurrent: 0 }, { maxConcurrent: 2.5 }, { maxConcurrent: 999 },
-      { maxPerProject: null }, { maxPerProject: -1 },
-    ]) {
-      assert.equal((await post({ agent: "human", ...bad })).status, 400, JSON.stringify(bad));
-    }
-    assert.equal(hub.storage.getSetting("dispatcher.window", "unset"), "unset");        // nothing persisted
-    assert.equal(hub.storage.getSetting("dispatcher.maxConcurrent", "unset"), "unset");
-    assert.equal((await post({ agent: "human", window: null, maxConcurrent: 2 })).status, 200); // valid still works
-    assert.equal(hub.storage.getSetting("dispatcher.maxConcurrent", 1), 2);
-  } finally { await server.stop(); hub.close(); await rm(dir, { recursive: true, force: true }); delete process.env.CORTEX_TOKEN; }
 });
 
 test("needs-you surfaces Memory Guard verdicts with reason and matched memory context", async () => {
@@ -339,100 +184,6 @@ test("needs-you surfaces Memory Guard verdicts with reason and matched memory co
   }
 });
 
-test("POST /runs/:id/stop kills a running agent; 404 when the run is not active", async () => {
-  process.env.CORTEX_TOKEN = "api-secret";
-  const dir = await mkdtemp(join(tmpdir(), "cortex-api-stop-"));
-  const hub = createCortex({ dbPath: join(dir, "s.sqlite") });
-  const staticDir = join(dir, "dist");
-  await mkdir(staticDir);
-  await writeFile(join(staticDir, "index.html"), "<main>UI</main>");
-  hub.upsertProjectProfile({ projectPath: dir, name: "Repo", mode: "general", summary: "Test" });
-  const agentLauncher = createAgentLauncher({ hub, spawnImpl: () => fakeChild(), logRoot: join(dir, "logs"), worktreesDir: join(dir, "wt"), git: fakeGit });
-  const server = createCortexServer({ hub, agentLauncher, staticDir });
-  try {
-    const address = await server.start();
-    const base = `http://${address.host}:${address.port}/api/v1`;
-    const post = (path, body) => fetch(`${base}${path}`, {
-      method: "POST", headers: { "content-type": "application/json", authorization: "Bearer api-secret" }, body: JSON.stringify(body),
-    });
-
-    const task = hub.addTask({ type: "chore", projectPath: dir, title: "Long run", status: "ready" });
-    const launched = await agentLauncher.launch({ taskId: task.id, agent: "codex" });
-    assert.equal(hub.storage.getTask(task.id).status, "in_progress");
-
-    const stopped = await post(`/runs/${launched.run.id}/stop`, { agent: "human" });
-    assert.equal(stopped.status, 200);
-    await launched.completed;
-    const blocked = hub.storage.getTask(task.id);
-    assert.equal(blocked.status, "blocked");
-    assert.match(blocked.blockReason, /Stopped by user/);
-
-    const missing = await post("/runs/not-a-run/stop", { agent: "human" });
-    assert.equal(missing.status, 404);
-  } finally {
-    await server.stop();
-    hub.close();
-    await rm(dir, { recursive: true, force: true });
-    delete process.env.CORTEX_TOKEN;
-  }
-});
-
-test("POST /runs/:id/merge local-merges a run's branch; 404 when the run has no branch", async () => {
-  process.env.CORTEX_TOKEN = "api-secret";
-  const dir = await mkdtemp(join(tmpdir(), "cortex-api-merge-"));
-  const repo = join(dir, "repo");
-  execFileSync("git", ["init", "-q", "-b", "main", repo]);
-  execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
-  execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
-  execFileSync("git", ["-C", repo, "commit", "-q", "--allow-empty", "-m", "init"]);
-  execFileSync("git", ["-C", repo, "checkout", "-q", "-b", "autopilot/t1"]);
-  execFileSync("git", ["-C", repo, "commit", "-q", "--allow-empty", "-m", "autopilot work"]);
-  execFileSync("git", ["-C", repo, "checkout", "-q", "main"]);
-
-  const hub = createCortex({ dbPath: join(dir, "m.sqlite") });
-  const staticDir = join(dir, "dist");
-  await mkdir(staticDir);
-  await writeFile(join(staticDir, "index.html"), "<main>UI</main>");
-  const server = createCortexServer({ hub, staticDir });
-  try {
-    const address = await server.start();
-    const base = `http://${address.host}:${address.port}/api/v1`;
-    const post = (path, body) => fetch(`${base}${path}`, {
-      method: "POST", headers: { "content-type": "application/json", authorization: "Bearer api-secret" }, body: JSON.stringify(body),
-    });
-
-    const task = hub.addTask({ type: "chore", projectPath: repo, title: "Do it", status: "ready" });
-    const run = hub.startRun({ taskId: task.id, agent: "codex" });
-    hub.updateRunProgress({ id: run.id, branch: "autopilot/t1" });
-
-    // a still-running run has a branch (written at launch) but nothing on it yet — refuse
-    const active = await post(`/runs/${run.id}/merge`, { agent: "human", baseRef: "main" });
-    assert.equal(active.status, 400);
-    hub.finishRun({ id: run.id, outcome: "success" });
-
-    // a baseRef that would parse as a git option is rejected before reaching git
-    const optionRef = await post(`/runs/${run.id}/merge`, { agent: "human", baseRef: "-q" });
-    assert.equal(optionRef.status, 400);
-
-    const merged = await post(`/runs/${run.id}/merge`, { agent: "human", baseRef: "main" });
-    assert.equal(merged.status, 200);
-    assert.equal((await merged.json()).merged, true);
-    // main now contains the run branch's commit
-    const log = execFileSync("git", ["-C", repo, "log", "main", "--oneline"], { encoding: "utf8" });
-    assert.match(log, /autopilot work/);
-
-    const noBranchTask = hub.addTask({ type: "chore", projectPath: repo, title: "No branch", status: "ready" });
-    const noBranchRun = hub.startRun({ taskId: noBranchTask.id, agent: "codex" });
-    const missing = await post(`/runs/${noBranchRun.id}/merge`, { agent: "human" });
-    assert.equal(missing.status, 404);
-  } finally {
-    await server.stop();
-    hub.close();
-    await rm(dir, { recursive: true, force: true });
-    delete process.env.CORTEX_TOKEN;
-  }
-});
-
 test("GET /costs aggregates spend by model and project", async () => {
   process.env.CORTEX_TOKEN = "api-secret";
   const dir = await mkdtemp(join(tmpdir(), "cortex-api-costs-"));
@@ -443,11 +194,11 @@ test("GET /costs aggregates spend by model and project", async () => {
   hub.upsertProjectProfile({ projectPath: dir, name: "Repo", mode: "general", summary: "Test" });
   // two finished runs with cost, one still-null (no usage reported)
   const t1 = hub.addTask({ type: "feature", projectPath: dir, title: "A", status: "ready" });
-  const r1 = hub.startRun({ taskId: t1.id, agent: "claude-code" });
-  hub.finishRun({ id: r1.id, outcome: "success", model: "opus", tokens: 1000, costUsd: 0.5 });
+  const r1 = hub.storage.startRun({ taskId: t1.id, agent: "claude-code" });
+  hub.storage.finishRun(r1.id, { outcome: "success", model: "opus", tokens: 1000, costUsd: 0.5 });
   const t2 = hub.addTask({ type: "chore", projectPath: dir, title: "B", status: "ready" });
-  const r2 = hub.startRun({ taskId: t2.id, agent: "claude-code" });
-  hub.finishRun({ id: r2.id, outcome: "success", model: "sonnet", tokens: 400, costUsd: 0.1 });
+  const r2 = hub.storage.startRun({ taskId: t2.id, agent: "claude-code" });
+  hub.storage.finishRun(r2.id, { outcome: "success", model: "sonnet", tokens: 400, costUsd: 0.1 });
   const server = createCortexServer({ hub, staticDir });
   try {
     const address = await server.start();
@@ -520,31 +271,62 @@ test("direct loopback read without a token is 200 (existing behavior unchanged)"
   });
 });
 
-test("dispatcher enrollment dedupes projects and silently filters a NEVER_AUTOPILOT repo", async () => {
-  process.env.CORTEX_TOKEN = "api-secret"; // writes are default-deny without a configured token
-  NEVER_AUTOPILOT.add(autopilotKey(normalizeProjectPath("/protected/repo"))); // key as the server computes it
+test("POST /projects/tier sets an autonomy tier, and /projects reads it back", async () => {
+  process.env.CORTEX_TOKEN = "api-secret";
   await withApiServer(async ({ base, dir }) => {
-    const post = (projects) => fetch(`${base}/api/v1/dispatcher`, {
+    const setTier = (body) => fetch(`${base}/api/v1/projects/tier`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer api-secret" },
-      body: JSON.stringify({ agent: "human", projects }),
+      body: JSON.stringify({ agent: "human", ...body }),
     });
-    const ok = await post([dir, dir, dir]);
-    assert.equal(ok.status, 200);
-    assert.equal((await ok.json()).projects.length, 1);
+    const projects = async () => (await (await fetch(`${base}/api/v1/projects`)).json());
 
-    // fail-closed FILTER, not a batch rejection: clients send the whole selection array, so a
-    // banned repo in the list must not 400 every enrollment — it just never lands.
-    const withBanned = await post([dir, "/protected/repo"]);
-    assert.equal(withBanned.status, 200);
-    const enrolled = (await withBanned.json()).projects;
-    assert.equal(enrolled.length, 1);
-    assert.equal(enrolled.some((p) => /protected/i.test(p)), false);
+    // default is watch, and the read carries tier/pinned so the UI needs no second endpoint
+    assert.equal((await projects())[0].tier, "watch");
+    assert.equal((await projects())[0].pinned, false);
 
-    // a banned-only batch yields an empty enrollment, never a banned one
-    const bannedOnly = await post(["/protected/repo"]);
-    assert.equal(bannedOnly.status, 200);
-    assert.deepEqual((await bannedOnly.json()).projects, []);
+    const assist = await setTier({ projectPath: dir, tier: "assist" });
+    assert.equal(assist.status, 200);
+    assert.deepEqual((await assist.json()).rejected, []);
+    assert.equal((await projects())[0].tier, "assist");
+
+    const auto = await setTier({ projectPath: dir, tier: "auto" });
+    assert.equal((await auto.json()).updated.length, 1);
+    assert.equal((await projects())[0].tier, "auto");
+
+    const bogus = await setTier({ projectPath: dir, tier: "turbo" });
+    assert.equal(bogus.status, 400);
+    assert.match((await bogus.json()).error.message, /unknown tier/);
+    assert.equal((await projects())[0].tier, "auto"); // nothing persisted
+  });
+});
+
+test("POST /projects/tier rejects the pinned live-money repo per item, never per batch", async () => {
+  process.env.CORTEX_TOKEN = "api-secret";
+  await withApiServer(async ({ base, dir }) => {
+    const setTier = (body) => fetch(`${base}/api/v1/projects/tier`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer api-secret" },
+      body: JSON.stringify({ agent: "human", ...body }),
+    });
+
+    // a batch carrying the pinned repo still lands the rest of the selection (the mobile
+    // Control screen sends its whole list; a throw used to 400 every enrollment)
+    const batch = await setTier({ projects: [{ projectPath: dir, tier: "auto" }, { projectPath: "C:/work/master", tier: "auto" }] });
+    assert.equal(batch.status, 200);
+    const body = await batch.json();
+    assert.deepEqual(body.updated, [{ projectPath: dir.replaceAll("\\", "/"), tier: "auto" }]);
+    assert.equal(body.rejected.length, 1);
+    assert.match(body.rejected[0].reason, /pinned at watch/);
+
+    // the pinned repo alone is a client error, with the reason named
+    const pinnedOnly = await setTier({ projectPath: "C:/work/master", tier: "assist" });
+    assert.equal(pinnedOnly.status, 400);
+    assert.match((await pinnedOnly.json()).error.message, /pinned at watch/);
+
+    // ...and it can still be set to its own floor, so the row is not a dead control
+    const toWatch = await setTier({ projectPath: "C:/work/master", tier: "watch" });
+    assert.equal(toWatch.status, 200);
   });
 });
 

@@ -33,7 +33,7 @@ test("stores validated typed links with provenance", async () => {
     assert.throws(() => storage.linkRecords({ ...link, id: undefined, confidence: 2 }), /between 0 and 1/);
     assert.equal(storage.unlink(link.id), true);
     assert.equal(storage.listLinks(file.id).length, 0);
-    assert.equal(storage.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get().version, 19);
+    assert.equal(storage.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get().version, 23);
   } finally {
     storage.close();
     await rm(dir, { recursive: true, force: true });

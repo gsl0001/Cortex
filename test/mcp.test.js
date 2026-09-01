@@ -8,7 +8,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { createCortex } from "../src/index.js";
 import { createCortexServer } from "../src/server.js";
 
-// Boots a real Memory Hub HTTP server, then spawns src/mcp.js over stdio pointed at it.
+// Boots a real Cortex HTTP server, then spawns src/mcp.js over stdio pointed at it.
 async function withMcp(run, { env = {} } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "cortex-mcp-"));
   const hub = createCortex({ dbPath: join(dir, "mcp.sqlite") });
@@ -47,12 +47,12 @@ function textOf(result) {
   return result.content.map((c) => c.text).join("\n");
 }
 
-test("MCP server lists the five memory tools", async () => {
+test("MCP server lists the six memory tools", async () => {
   await withMcp(async ({ client }) => {
     const { tools } = await client.listTools();
     assert.deepEqual(
       tools.map((t) => t.name).sort(),
-      ["memory_lesson", "memory_recall_task", "memory_remember", "memory_search", "memory_update_task"],
+      ["memory_get", "memory_lesson", "memory_recall_task", "memory_remember", "memory_search", "memory_update_task"],
     );
   });
 });
@@ -88,7 +88,7 @@ test("memory_recall_task lists tasks and filters by taskId client-side", async (
   });
 });
 
-test("memory_update_task claims and completes through the transition routes", async () => {
+test("memory_update_task claims and parks in review, but an agent may not complete to done", async () => {
   await withMcp(async ({ client, dir, hub }) => {
     const task = hub.addTask({ type: "chore", projectPath: dir, title: "Do it", status: "ready" });
     const claimed = await client.callTool({
@@ -97,22 +97,33 @@ test("memory_update_task claims and completes through the transition routes", as
     });
     assert.match(textOf(claimed), /"status":\s*"in_progress"/);
 
-    const done = await client.callTool({
+    // the MCP client is an agent (agent="mcp-agent"); completing to done is rejected — agents park in review
+    const rejected = await client.callTool({
       name: "memory_update_task",
       arguments: { taskId: task.id, action: "complete", evidence: "verified by mcp test" },
     });
-    assert.match(textOf(done), /"status":\s*"done"/);
+    assert.equal(rejected.isError, true);
+    assert.match(textOf(rejected), /may not set a task to 'done'/);
+    assert.equal(hub.storage.getTask(task.id).status, "in_progress");
+
+    const reviewed = await client.callTool({
+      name: "memory_update_task",
+      arguments: { taskId: task.id, action: "review", evidence: "verified by mcp test" },
+    });
+    assert.match(textOf(reviewed), /"status":\s*"review"/);
   });
 });
 
-test("memory_lesson stores a lesson visible in the brief", async () => {
+test("memory_lesson stores a lesson (served by JIT, no longer injected into the brief)", async () => {
   await withMcp(async ({ client, dir, hub }) => {
     const saved = await client.callTool({
       name: "memory_lesson",
       arguments: { projectPath: dir, lesson: "Start the backend on 4317 before trusting the Vite proxy." },
     });
     assert.match(textOf(saved), /"action":\s*"accepted"/);
-    assert.match(hub.buildBrief({ projectPath: dir }).text, /4317 before trusting/);
+    // audit III: lessons dropped from the brief (0/70 ever cited); still stored + JIT-served
+    assert.equal(hub.storage.listLessons(dir).length, 1);
+    assert.doesNotMatch(hub.buildBrief({ projectPath: dir }).text, /4317 before trusting/);
   });
 });
 

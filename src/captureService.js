@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { classifyCandidate, normalizeCandidate, isNearDuplicate } from "./capturePolicy.js";
+import { classifyCandidate, normalizeCandidate, isNearDuplicate, keyTokens, containment } from "./capturePolicy.js";
 import { linkCapturedRecord } from "./linker.js";
 import { enqueueRecord } from "./indexer.js";
 import { LocalMinHashEmbeddingProvider } from "./embeddingProvider.js";
@@ -37,6 +37,44 @@ export function findFixDuplicate(fields, recentFixes, { threshold = FIX_DEDUP_SI
     }
   }
   return best;
+}
+
+// Distillation paraphrases the same decision differently per transcript, so the 0.82
+// token-overlap gate let reworded duplicates through — one decision landed three times in
+// 3.3 days of live data (value audit II). MinHash catches rewording the way it does for
+// fixes; decisions have no file anchor, so text similarity over decision+rationale is the
+// whole test. Threshold shares the fixes' measured anchors — tune only with measured pairs.
+const DECISION_DEDUP_SIMILARITY = Number(process.env.CORTEX_DECISION_DEDUP_SIMILARITY || 0.7);
+
+// The 0.7 full-text gate misses restatements whose rationale is freshly worded: 133 of 630 live
+// decisions (21%) were restatements of another, almost all from the same session's repeated
+// flushes (measured 2026-08-03). The choice sentence is the stable anchor — live dupe pairs
+// measure 0.7–1.0 headline containment (94% at >=0.8) while random same-project pairs sit at
+// 0.0–0.3 (2 of 747 above 0.7). A headline match below the full-text gate is a REVISION, not a
+// duplicate: the caller inserts it with supersedesId so the newest wording stays live and the
+// prior drops to history. A reversal ("A over B" -> "B over A") lands here too — token measures
+// cannot see the flip, and superseding is the correct outcome for it anyway.
+const DECISION_HEADLINE_CONTAINMENT = Number(process.env.CORTEX_DECISION_HEADLINE_CONTAINMENT || 0.8);
+
+export function findDecisionDuplicate(fields, recentDecisions, {
+  threshold = DECISION_DEDUP_SIMILARITY,
+  headlineThreshold = DECISION_HEADLINE_CONTAINMENT,
+} = {}) {
+  const text = `${fields.decision} ${fields.rationale} ${fields.alternatives || ""}`;
+  const headline = keyTokens(fields.decision);
+  let best = null;
+  let revision = null;
+  for (const decision of recentDecisions) {
+    const similarity = minhash.similarity(text, `${decision.decision} ${decision.rationale} ${decision.alternatives || ""}`);
+    if (similarity >= threshold && (!best || similarity > best.similarity)) {
+      best = { duplicate: true, existingId: decision.id, similarity };
+    }
+    const overlap = containment(headline, keyTokens(decision.decision));
+    if (overlap >= headlineThreshold && (!revision || overlap > revision.headlineOverlap)) {
+      revision = { revision: true, existingId: decision.id, headlineOverlap: overlap };
+    }
+  }
+  return best || revision;
 }
 
 function fingerprint(candidate, classification) {
@@ -82,8 +120,18 @@ function recordRecallUsefulness(storage, projectPath, agent, fixId, filesChanged
     const matchedFiles = injected.filter((file) => wanted.has(String(file).toLowerCase()));
     if (!matchedFiles.length) return;
     const perRecord = recent.payload.injectedFixes;
+    // Project-scoped (audit III): a fix injected from another project must not count as useful
+    // recall here — relative paths like Core/Foo.swift collide across repos (a sleep-app path
+    // stored under a hub session matched a hub capture), inflating the honest-usefulness metric
+    // the Aug-17 kill decision reads. Cross-project reuse is credited by explicit citations
+    // (recall_cited), not this file-overlap heuristic. Legacy payloads lack projectPath -> allow.
+    // Separator-insensitive compare: canonicalizeProjectPath'd rows use "/" but older payloads
+    // (and hand-written ones) may hold "\\" — see storage.js normalizeProjectPath.
+    const sameProject = (a) => a == null
+      || String(a).replaceAll("\\", "/").toLowerCase() === String(projectPath).replaceAll("\\", "/").toLowerCase();
     const matchedFixIds = (perRecord || [])
-      .filter((f) => (f.filesChanged || []).some((file) => wanted.has(String(file).toLowerCase())))
+      .filter((f) => sameProject(f.projectPath)
+        && (f.filesChanged || []).some((file) => wanted.has(String(file).toLowerCase())))
       .map((f) => f.id);
     const narrow = perRecord
       ? matchedFixIds.length === 1
@@ -95,35 +143,12 @@ function recordRecallUsefulness(storage, projectPath, agent, fixId, filesChanged
   }
 }
 
-const LESSON_PROMOTION_THRESHOLD = Number(process.env.CORTEX_LESSON_PROMOTION_THRESHOLD || 3);
-const LESSON_WINDOW_DAYS = Number(process.env.CORTEX_LESSON_WINDOW_DAYS || 30);
-
-// A file that keeps accumulating fixes IS the recurring pattern — promote it to a lesson
-// directly from fix history. (The old promoter keyed off near-duplicate discards, which
-// never fired in 22 days of live capture, so no lesson was ever promoted.)
-function promoteFragileFileLesson(storage, projectPath, agent, filesChanged) {
-  try {
-    const bases = [...new Set((filesChanged || []).map(fileBase).filter(Boolean))];
-    if (!bases.length) return;
-    const since = Date.now() - LESSON_WINDOW_DAYS * 86_400_000;
-    const recent = storage.listFixes(projectPath, { limit: 200 })
-      .filter((fix) => new Date(fix.createdAt).getTime() >= since);
-    const lessons = storage.listLessons(projectPath, { limit: 100 });
-    for (const base of bases) {
-      const hits = recent.filter((fix) => (fix.filesChanged || []).some((f) => fileBase(f) === base));
-      if (hits.length < LESSON_PROMOTION_THRESHOLD) continue;
-      if (lessons.some((l) => String(l.statement || "").toLowerCase().includes(base))) continue;
-      storage.insertLesson({
-        projectPath,
-        statement: `Fragile file: ${base} — ${hits.length} fixes in ${LESSON_WINDOW_DAYS} days; latest: ${hits[0].summary?.slice(0, 120)}`,
-        status: "learned",
-      });
-      storage.recordMetric("lesson_promoted", projectPath, { agent, file: base, hits: hits.length });
-    }
-  } catch {
-    // telemetry/promotion must never block capture
-  }
-}
+// The fragile-file lesson generator is gone. It was the ONLY lesson template, produced 83
+// rows, and not one was ever cited. Worse, its count was wrong: it counted fix RECORDS, which
+// duplicate captures inflate 2-6x against git — SETUP.md read as 92 fixes where the repo has
+// 14 commits, server.js 89 against 42. A number that overstates churn sixfold, attached to a
+// lesson nobody reads, is not a lesson. The lessons table stays: agents and humans still write
+// real ones through the API, and JIT recall still serves them.
 
 function admitCandidate(storage, candidate) {
   const classification = classifyCandidate(candidate);
@@ -145,10 +170,15 @@ function admitCandidate(storage, candidate) {
     const dup = isFix
       ? findFixDuplicate(classification.fields, recent)
       : isNearDuplicate(
-        { signature: `${classification.fields.question} ${classification.fields.finding}`, verification: classification.fields.verification },
+        {
+          signature: `${classification.fields.question} ${classification.fields.finding}`,
+          key: classification.fields.question, // compared on its own; a long finding hides an identical question
+          verification: classification.fields.verification,
+        },
         recent.map((record) => ({
           id: record.id,
           signature: `${record.question} ${record.finding}`,
+          key: record.question,
           verification: record.verification,
           qualityStatus: record.qualityStatus,
         })),
@@ -159,7 +189,6 @@ function admitCandidate(storage, candidate) {
         storage.setRecordVerification(classification.type, dup.existingId, classification.fields.verification);
         storage.transaction(() => enqueueRecord(storage, dup.existingId, classification.type));
       }
-      if (isFix) promoteFragileFileLesson(storage, candidate.projectPath, candidate.agent, classification.fields.filesChanged);
       return { action: "discarded", reason: "discarded_near_duplicate", recordType: classification.type, recordId: dup.existingId };
     }
   }
@@ -169,10 +198,23 @@ function admitCandidate(storage, candidate) {
     if (!task || task.projectPath !== candidate.projectPath) {
       return { action: "discarded", reason: "discarded_unknown_task", recordType: "task_update", recordId: null };
     }
+    // Completion authority: a captured agent narration ("Task X is done: ...") must not silently
+    // finish a task behind the human's back — agents park in review for human sign-off. Clamp
+    // done->review unless the capture is human-authored. Mirrors the completeTask/editTask guard
+    // in commands.js; the completion detail is still preserved as the review evidence.
+    const requested = classification.status;
+    const clamped = requested === "done" && candidate.agent !== "human";
+    const status = clamped ? "review" : requested;
+    // PR #29 authority clamp was unmeasured (audit III): count how often an agent tries to
+    // self-complete behind the human's back, so the guard's value is visible in stats.
+    if (clamped) {
+      try { storage.recordMetric("completion_clamped", candidate.projectPath, { taskId: task.id, agent: candidate.agent }); }
+      catch { /* observability is best-effort */ }
+    }
     storage.updateTask(task.id, {
-      status: classification.status,
-      blockReason: classification.status === "blocked" ? classification.detail || "blocked" : null,
-      evidence: classification.status === "done" ? classification.detail || "completed" : task.evidence,
+      status,
+      blockReason: status === "blocked" ? classification.detail || "blocked" : null,
+      evidence: requested === "done" ? classification.detail || "completed" : task.evidence,
     });
     return { action: "accepted", reason: "accepted_task_update", recordType: "task_update", recordId: task.id };
   }
@@ -205,7 +247,6 @@ function admitCandidate(storage, candidate) {
       return inserted;
     });
     recordRecallUsefulness(storage, candidate.projectPath, candidate.agent, record.id, fields.filesChanged);
-    promoteFragileFileLesson(storage, candidate.projectPath, candidate.agent, fields.filesChanged);
     return { action: "accepted", reason: "accepted_fix", recordType: "fix", recordId: record.id };
   }
 
@@ -226,27 +267,45 @@ function admitCandidate(storage, candidate) {
   }
 
   if (classification.type === "decision") {
-    const recent = storage.listDecisions(candidate.projectPath, { limit: 50, excludeSuperseded: true });
-    const signature = `${fields.decision} ${fields.rationale} ${fields.alternatives || ""}`;
-    const dup = isNearDuplicate(
-      { signature },
-      recent.map((d) => ({ id: d.id, signature: `${d.decision} ${d.rationale} ${d.alternatives || ""}` })),
-      { threshold: DEDUP_THRESHOLD },
-    );
-    if (dup?.duplicate) {
-      return { action: "discarded", reason: "discarded_near_duplicate", recordType: "decision", recordId: dup.existingId };
+    // An explicit "Supersedes: [m:xxxxxx]" marker outranks similarity detection: the agent is
+    // declaring a reversal of a decision it was served, so the duplicate gate is skipped —
+    // a reversal that reads like its predecessor is still a new decision.
+    const marked = supersededDecisionFromMarker(storage, candidate);
+    let prior = marked;
+    if (!marked) {
+      const recent = storage.listDecisions(candidate.projectPath, { limit: 50, excludeSuperseded: true });
+      const dup = findDecisionDuplicate(fields, recent);
+      if (dup?.duplicate) {
+        return { action: "discarded", reason: "discarded_near_duplicate", recordType: "decision", recordId: dup.existingId };
+      }
+      prior = dup?.revision ? recent.find((d) => d.id === dup.existingId) : null;
     }
     const record = storage.transaction(() => {
       const inserted = storage.insertDecision({
         id: randomUUID(), projectPath: candidate.projectPath, agent: candidate.agent,
         decision: fields.decision, rationale: fields.rationale, alternatives: fields.alternatives,
         captureSource: candidate.source, qualityStatus: "accepted", fingerprint: hash,
+        supersedesId: prior?.id || null,
       });
-      linkCapturedRecord(storage, inserted, "decision");
+      const recordEntity = linkCapturedRecord(storage, inserted, "decision");
+      if (prior) {
+        const priorEntity = storage.upsertEntity({
+          entityType: "record", canonicalKey: `decision:${prior.id}`, label: prior.decision,
+          projectPath: prior.projectPath, metadata: { recordId: prior.id, recordType: "decision" },
+        });
+        storage.linkRecords({
+          fromEntityId: recordEntity.id, toEntityId: priorEntity.id,
+          linkType: "supersedes", source: "deterministic", confidence: 1, originRecordId: inserted.id,
+        });
+      }
       enqueueRecord(storage, inserted.id, "decision");
       return inserted;
     });
-    return { action: "accepted", reason: "accepted_decision", recordType: "decision", recordId: record.id };
+    return {
+      action: "accepted",
+      reason: prior ? "accepted_decision_revision" : "accepted_decision",
+      recordType: "decision", recordId: record.id,
+    };
   }
 
   if (classification.type === "handoff") {
@@ -267,6 +326,18 @@ function admitCandidate(storage, candidate) {
     expiresAt: expiresInDays(7),
   });
   return { action: "accepted", reason: "stored_session_event", recordType: "session_event", recordId: record.id };
+}
+
+// Reversal pointer: the agent writes "Supersedes: [m:xxxxxx]" when its decision contradicts a
+// briefed one. Resolving the prefix here is the whole trigger — capture-side text similarity
+// never fired (supersedes_id 0/815 in the live DB), but the retrieved set is small and id-tagged.
+function supersededDecisionFromMarker(storage, candidate) {
+  try {
+    const m = candidate.message.match(/\bSupersedes:\s*\[m:([0-9a-f]{4,8})\]/i);
+    return m ? storage.findDecisionByPrefix(candidate.projectPath, m[1].toLowerCase()) : null;
+  } catch {
+    return null; // marker resolution must never block capture
+  }
 }
 
 // Closed-loop citation: brief items carry [m:xxxxxx] ids (brief.js); when a session's final
@@ -290,7 +361,36 @@ function recordCitations(storage, candidate) {
       [...candidate.message.matchAll(/\[m:([0-9a-f]{4,8})\]/gi)].map((m) => m[1].toLowerCase()),
     )].filter((idPrefix) => !stale.has(idPrefix)); // a staled id is a correction, not a use
     for (const idPrefix of cited) {
-      storage.recordMetric("recall_cited", candidate.projectPath, { agent: candidate.agent, idPrefix });
+      // Attribution honesty (injection audit, Aug 28): the old path credited any echoed id to
+      // the session's project with no dedup — 17% of live citations belonged to a different
+      // project's record, 20% were never served, and 28% were same-session repeats (Stop fires
+      // per turn). Together those inflated the citation rate the Aug-31 verdict rests on.
+      const record = storage.findRecordByPrefix(idPrefix);
+      const creditProject = record?.projectPath || candidate.projectPath;
+      if (candidate.sessionId) {
+        const already = storage.listMetrics(creditProject, {
+          kind: "recall_cited", sessionId: candidate.sessionId, limit: 50,
+        }).some((m) => m.payload?.idPrefix === idPrefix);
+        if (already) continue;
+      }
+      // Channel attribution: was this id actually served to this session, and by which rail?
+      let source = "unknown"; // no session key or unresolved id — channel can't be determined
+      if (candidate.sessionId && record) {
+        // serving metrics are written under the SESSION's project, even when the record
+        // being cited belongs to another project — look them up there
+        const servedByBrief = storage.listMetrics(candidate.projectPath, {
+          kind: "recall_injected", sessionId: candidate.sessionId, limit: 100,
+        }).some((m) => ["injectedFixIds", "injectedResearchIds", "injectedDecisionIds"]
+          .some((key) => (m.payload?.[key] || []).includes(record.id)));
+        const servedByJit = !servedByBrief && storage.listMetrics(candidate.projectPath, {
+          kind: "jit_recall", sessionId: candidate.sessionId, limit: 100,
+        }).some((m) => (m.payload?.servedFixIds || []).includes(record.id));
+        source = servedByBrief ? "brief" : servedByJit ? "jit" : "unserved";
+      }
+      storage.recordMetric("recall_cited", creditProject, {
+        agent: candidate.agent, idPrefix, sessionId: candidate.sessionId || null,
+        resolved: Boolean(record), recordType: record?.recordType || null, source,
+      });
     }
   } catch {
     // telemetry must never block capture

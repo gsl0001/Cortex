@@ -3,6 +3,7 @@ import { api } from "./api.js";
 import CommandCenter from "./CommandCenter.jsx";
 import ControlCenter from "./ControlCenter.jsx";
 import Goals, { addDays, mondayOf, today } from "./Goals.jsx";
+import PortfolioDoctor from "./PortfolioDoctor.jsx";
 
 const NAV_ICONS = {
   "Command center": "⊞",
@@ -17,7 +18,9 @@ const MAIN_VIEWS = ["Command center", "Control Center", "Goals", "Search", "Task
 // Short single-word labels for the mobile bottom bar (full names overflow a ~64px cell).
 // aria-label/title keep the full name; only the visible text shortens.
 const SHORT_LABELS = { "Command center": "Home", "Control Center": "Control", "Knowledge graph": "Graph", "Activity log": "Activity" };
-const MORE_VIEWS = ["Runs", "Health & audit"];
+// "Runs" lived here as a bare name/status card list, fully superseded by Control Center's
+// live agents + run history — deleted with its generic ListView renderer.
+const MORE_VIEWS = ["Portfolio", "Health & audit"];
 const VIEWS = [...MAIN_VIEWS, ...MORE_VIEWS];
 
 function SearchEmptyState() {
@@ -89,12 +92,6 @@ function SearchView({ projects }) {
               <option key={item.projectPath} value={item.projectPath}>{item.name}</option>
             ))}
           </select>
-        </div>
-        <div className="filter-section">
-          <p className="eyebrow">Ranking</p>
-          <label><input type="checkbox" defaultChecked /> Verified first</label>
-          <label><input type="checkbox" defaultChecked /> Follow links</label>
-          <p className="hint">Recency boosts current work without burying verified history.</p>
         </div>
       </aside>
 
@@ -177,48 +174,6 @@ function SearchView({ projects }) {
   );
 }
 
-function ListView({ title, endpoint, projects }) {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    setError("");
-    api(endpoint).then(setData).catch((e) => setError(e.message)); // no project = all projects
-  }, [endpoint]);
-
-  const rows = Array.isArray(data) ? data : data?.issues || [];
-
-  return (
-    <main className="page">
-      <p className="eyebrow">Operations</p>
-      <div className="page-header">
-        <h1>{title}</h1>
-        <span className="dashboard-scope">All projects</span>
-      </div>
-      {error && <div role="alert" className="error">{error}</div>}
-      <div className="cards">
-        {rows.map((item, index) => (
-          <article className="card" key={item.id || item.projectPath || index}>
-            {item.projectPath && <span className="card-project">{projectName(projects, item.projectPath)}</span>}
-            <h2>{item.name || item.title || item.code || item.linkType}</h2>
-            <p>{item.summary || item.message || item.mode || item.status || item.source}</p>
-          </article>
-        ))}
-        {data && rows.length === 0 && (
-          <div className="empty" style={{ gridColumn: "1 / -1" }}>
-            <svg className="empty-icon" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect x="10" y="14" width="32" height="24" rx="4" stroke="currentColor" strokeWidth="2.5"/>
-              <path d="M18 22h16M18 28h10" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"/>
-            </svg>
-            <h2>No records</h2>
-            <p>Nothing in this view yet.</p>
-          </div>
-        )}
-      </div>
-    </main>
-  );
-}
-
 const TASK_STATUS_LABELS = {
   backlog: "Backlog",
   ready: "Ready",
@@ -233,15 +188,6 @@ const TASK_PRIORITY_RANK = { urgent: 0, high: 1, normal: 2, medium: 2, low: 3 };
 
 // Controlled task-type vocabulary; mirrors TASK_TYPES in src/commands.js (server validates).
 const TASK_TYPES = ["feature", "bug", "chore", "docs", "test", "research", "infra"];
-
-const DISPATCH_AGENTS = new Set(["codex", "claude-code"]);
-// Mirrors src/dispatcher.js isDispatchable: Autopilot launches ready, agent-assigned,
-// due (or unscheduled) tasks. Client-side cue only; the server remains the source of truth.
-function isDispatchable(task) {
-  return task.status === "ready"
-    && DISPATCH_AGENTS.has(task.assignedAgent)
-    && (!task.scheduledFor || task.scheduledFor <= today());
-}
 
 const PROJECT_COLORS = ["#3b82f6", "#f59e0b", "#4ade80", "#a78bfa", "#ef4444", "#06b6d4"];
 
@@ -306,8 +252,6 @@ function TaskRow({ task, tag, showProject, projects, tasks, run, menuOpen, onTog
   const canContinue = task.status === "in_progress" && run?.sessionId;
   const priority = task.priority || "normal";
   const showPriority = priority === "urgent" || priority === "high"; // normal/low is the default; badging it adds nothing
-  // Autopilot picks up ready + agent-assigned + due tasks (mirrors src/dispatcher.js isDispatchable)
-  const dispatchable = isDispatchable(task);
   const detail = taskDetail(task, run);
   const openHref = run?.sessionId && (run.agent === "codex"
     ? `codex://threads/${encodeURIComponent(run.sessionId)}`
@@ -322,9 +266,6 @@ function TaskRow({ task, tag, showProject, projects, tasks, run, menuOpen, onTog
             title={tag === "roadmap" ? "Roadmap task" : "User request"}
             aria-label={tag === "roadmap" ? "Roadmap task" : "User request"}
           />
-        )}
-        {dispatchable && (
-          <span className="task-spark" title="Ready, assigned, and due — Autopilot will pick this up" aria-label="Dispatchable">⚡</span>
         )}
         <span className="task-title-text">{task.title}</span>
         {task.type && <span className="type-badge">{task.type}</span>}
@@ -1319,7 +1260,6 @@ export default function App() {
     return () => window.removeEventListener("resize", resize);
   }, []);
 
-  const endpoints = { Tasks: "/tasks", Runs: "/runs" };
   const projectPath = projects[0]?.projectPath || "";
   const navigate = (name) => { setView(name); setMoreOpen(false); };
 
@@ -1327,7 +1267,7 @@ export default function App() {
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
       <aside className="app-sidebar">
-        <div className="brand"><span className="logo">C</span><strong className="brand-name">Cortex</strong></div>
+        <div className="brand"><span className="logo">M</span><strong className="brand-name">Cortex</strong></div>
         <nav aria-label="Primary">
           {(mobile ? MAIN_VIEWS.slice(0, 5) : MAIN_VIEWS).map((name) => (
             <button
@@ -1375,12 +1315,12 @@ export default function App() {
         <TasksView projects={projects} />
       ) : view === "Knowledge graph" ? (
         <GraphView />
+      ) : view === "Portfolio" ? (
+        <PortfolioDoctor />
       ) : view === "Health & audit" ? (
         <StatsView projects={projects} />
-      ) : view === "Activity log" ? (
-        <ActivityLogView projects={projects} />
       ) : (
-        <ListView title={view} endpoint={endpoints[view]} projects={projects} />
+        <ActivityLogView projects={projects} />
       )}
       </div>
     </div>

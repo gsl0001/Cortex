@@ -4,8 +4,8 @@
  * Reads Claude Code's JSON payload from stdin, checks tool_input.file_path,
  * and calls `claude flush` if the path contains "memory".
  */
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { createCortex, flushClaudeStop } from "./index.js";
 
 let raw = "";

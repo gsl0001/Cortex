@@ -37,10 +37,10 @@ test("computeStats reports recall usefulness rate", async () => {
     hub.storage.recordMetric("recall_injected", dir, { usedTokens: 10, maxTokens: 1200, injectedFixIds: [], injectedFilesChanged: [] });
 
     hub.storage.insertFix({ id: crypto.randomUUID(), projectPath: dir, agent: "a", summary: "seed retry fix", filesChanged: ["retry.js"], verification: "npm test passed" });
-    createClaudeHookContext(hub, { cwd: dir }); // injects retry.js -> counted in the denominator, hit
+    await createClaudeHookContext(hub, { cwd: dir, branch: "retry-hardening" }); // injects retry.js -> counted in the denominator, hit
     hub.captureCandidate({ projectPath: dir, agent: "claude-code", message: "Fixed retry race. Files changed: retry.js. Verification: npm test passed" });
 
-    createClaudeHookContext(hub, { cwd: dir }); // injects retry.js again -> counted, but no matching fix follows (miss)
+    await createClaudeHookContext(hub, { cwd: dir, branch: "retry-hardening" }); // injects retry.js again -> counted, but no matching fix follows (miss)
 
     const stats = hub.stats({ projectPath: dir });
     assert.equal(stats.recallInjectedWithFixes, 2);
@@ -76,6 +76,22 @@ test("hub.sweep deletes expired session events and reports counts", async () => 
     const result = hub.sweep();
     assert.equal(result.sessionEventsDeleted, 1);
     assert.equal(typeof result.metricsDeleted, "number");
+  } finally {
+    hub.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("goalsViewedCount reflects machine-scoped goal-portfolio views, not per-project", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cortex-goalsview-"));
+  const hub = createCortex({ dbPath: join(dir, "gv.sqlite") });
+  try {
+    hub.upsertProjectProfile({ projectPath: dir, name: "Test", mode: "general", summary: "" });
+    // getGoalsPortfolio records views under the reserved "machine" scope (they span projects);
+    // a real project's stats must still surface them — reading per-project events yields 0.
+    hub.storage.recordMetric("goals_viewed", "machine", {});
+    hub.storage.recordMetric("goals_viewed", "machine", {});
+    assert.equal(hub.stats({ projectPath: dir }).goalsViewedCount, 2);
   } finally {
     hub.close();
     await rm(dir, { recursive: true, force: true });

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { assertLinkType } from "./linkTypes.js";
@@ -84,12 +84,8 @@ export function normalizeProjectPath(projectPath) {
   return canonical(resolveGitRoot(resolved));
 }
 
-// Single source of truth for the default DB location: a global, cwd-independent
-// path so the server, the CLI, and the capture hooks all open the SAME database
-// when CORTEX_DB is unset. (A cwd-relative default would split the hub's memory
-// across whatever directory each component happened to run from.)
 export function defaultDbPath() {
-  return resolve(process.env.CORTEX_DB || join(homedir(), ".cortex", "cortex.sqlite"));
+  return resolve(process.env.CORTEX_DB || ".cortex/cortex.sqlite");
 }
 
 // local calendar date, not UTC: at UTC-7 the UTC date flips at 5pm local and
@@ -273,6 +269,149 @@ export class CortexStorage {
     if (currentVersion < 17) this.migrateRunWorktreeSchema();
     if (currentVersion < 18) this.migrateCanonicalProjectPathSchema();
     if (currentVersion < 19) this.migrateDistillSchema();
+    if (currentVersion < 20) this.migrateThroughputSchema();
+    if (currentVersion < 21) this.migrateEmbeddingSchema();
+    if (currentVersion < 22) this.migrateDeliverableSchema();
+    if (currentVersion < 23) this.migrateSearchTokenizerSchema();
+  }
+
+  // Evidence contracts: 91 of 105 completed tasks produced no commit — demos, store pages,
+  // prospect lists, campaign reviews — so a gate demanding a runnable shell command made most
+  // real work permanently ineligible. A task may instead name the artifact that will exist
+  // when it is done (a path, a URL, or a number the human can check in seconds).
+  migrateDeliverableSchema() {
+    const hasColumn = (table, column) =>
+      this.db.prepare(`PRAGMA table_info(${table})`).all().some(({ name }) => name === column);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!hasColumn("workflow_tasks", "deliverable")) {
+        this.db.exec("ALTER TABLE workflow_tasks ADD COLUMN deliverable TEXT");
+      }
+      this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+        .run(22, nowIso());
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  // Porter stemming for FTS (injection research Aug 28): unicode61 alone missed
+  // fix/fixes and authenticate/authentication, and bm25() now feeds both search's lexical
+  // score and (via crossProjectMatches) the brief. Rebuilt synchronously here — a few
+  // thousand rows, sub-second — instead of via index_jobs, whose drain runs inside the
+  // recall hook and would blow its 10s timeout on a full reindex.
+  migrateSearchTokenizerSchema() {
+    const parseList = (value) => { try { return JSON.parse(value || "[]").join(" "); } catch { return ""; } };
+    // a mid-version DB may predate a record table (migration test fixtures do) — skip, don't throw
+    const hasTable = (name) => Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.exec(`
+        DROP TABLE IF EXISTS search_chunks;
+        CREATE VIRTUAL TABLE search_chunks USING fts5(
+          record_id UNINDEXED,
+          project_path UNINDEXED,
+          record_type UNINDEXED,
+          title,
+          body,
+          tags,
+          tokenize = 'porter unicode61'
+        );
+      `);
+      const insert = this.db.prepare(`
+        INSERT INTO search_chunks (record_id, project_path, record_type, title, body, tags)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      // same content mapping as indexer.recordContent, off raw rows
+      if (hasTable("fix_entries")) for (const r of this.db.prepare("SELECT id, project_path, summary, verification, residual_risk, files_changed FROM fix_entries").all()) {
+        insert.run(r.id, r.project_path, "fix", r.summary || "", [r.verification, r.residual_risk].filter(Boolean).join(" "), parseList(r.files_changed));
+      }
+      if (hasTable("research_entries")) for (const r of this.db.prepare("SELECT id, project_path, question, finding, verification, residual_risk, reuse_tags FROM research_entries").all()) {
+        insert.run(r.id, r.project_path, "research", r.question || "", [r.finding, r.verification, r.residual_risk].filter(Boolean).join(" "), parseList(r.reuse_tags));
+      }
+      if (hasTable("decision_entries")) for (const r of this.db.prepare("SELECT id, project_path, decision, rationale, alternatives FROM decision_entries").all()) {
+        insert.run(r.id, r.project_path, "decision", r.decision || "", [r.rationale, r.alternatives].filter(Boolean).join(" "), "");
+      }
+      this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(23, nowIso());
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  // Precomputed doc vectors for OllamaEmbeddingProvider (one row per search_chunks record;
+  // float32 blob). Populated by the server's embedMissing sweep, never on the write path.
+  migrateEmbeddingSchema() {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS embedding_vectors (
+          record_id TEXT PRIMARY KEY,
+          model TEXT NOT NULL,
+          vector BLOB NOT NULL,
+          created_at TEXT NOT NULL
+        );
+      `);
+      this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(21, nowIso());
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  countEmbeddings() {
+    return this.db.prepare("SELECT COUNT(*) AS count FROM embedding_vectors").get().count;
+  }
+
+  allEmbeddings() {
+    return this.db.prepare("SELECT record_id AS recordId, vector FROM embedding_vectors").all();
+  }
+
+  putEmbedding(recordId, model, vectorBlob) {
+    this.db.prepare("INSERT OR REPLACE INTO embedding_vectors(record_id, model, vector, created_at) VALUES (?, ?, ?, ?)")
+      .run(recordId, model, vectorBlob, nowIso());
+  }
+
+  missingEmbeddingChunks(limit = 256) {
+    return this.db.prepare(`
+      SELECT record_id AS recordId, title, body FROM search_chunks
+      WHERE record_id NOT IN (SELECT record_id FROM embedding_vectors) LIMIT ?
+    `).all(limit);
+  }
+
+  pruneOrphanEmbeddings() {
+    this.db.prepare("DELETE FROM embedding_vectors WHERE record_id NOT IN (SELECT record_id FROM search_chunks)").run();
+  }
+
+  // Value audit II Phase 1: reviewer/auto-merge outcomes become queryable run columns
+  // (they lived only in task evidence free text), and grooming stamps tasks whose
+  // dispatch fields were machine-defaulted so auto-merge can exclude them.
+  migrateThroughputSchema() {
+    const hasTable = (name) => Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
+    const hasColumn = (table, col) => this.db.prepare(`PRAGMA table_info(${table})`).all()
+      .some(({ name }) => name === col);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (hasTable("runs")) {
+        for (const [col, type] of [
+          ["review_verdict", "TEXT"], ["review_notes", "TEXT"],
+          ["auto_merged", "INTEGER"], ["diff_confined", "INTEGER"],
+        ]) {
+          if (!hasColumn("runs", col)) this.db.exec(`ALTER TABLE runs ADD COLUMN ${col} ${type}`);
+        }
+      }
+      if (hasTable("workflow_tasks") && !hasColumn("workflow_tasks", "groomed_at")) {
+        this.db.exec("ALTER TABLE workflow_tasks ADD COLUMN groomed_at TEXT");
+      }
+      this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(20, nowIso());
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   // Queue for transcript distillation: the Stop hook (10s budget) enqueues; the server drains
@@ -315,11 +454,18 @@ export class CortexStorage {
     return { id, deduped: false };
   }
 
-  nextDistillJob() {
+  nextDistillJob(now = new Date()) {
+    // Transient model outages (claude auth expiry / usage limit — the Aug 9-12 blackout
+    // stranded 71 transcripts) retry hourly once cooled down; real errors stay dead.
+    // ponytail: no attempts column — sweepProcessedDistillJobs' 30-day retention is the retry cap.
+    const retryBefore = new Date(now.getTime() - 3_600_000).toISOString();
     return this.db.prepare(`
       SELECT id, project_path AS projectPath, transcript_path AS transcriptPath, agent
-      FROM distill_jobs WHERE status = 'pending' ORDER BY created_at LIMIT 1
-    `).get() ?? null;
+      FROM distill_jobs
+      WHERE status = 'pending'
+         OR (status = 'error' AND error = 'model unavailable or timed out' AND processed_at < ?)
+      ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, created_at LIMIT 1
+    `).get(retryBefore) ?? null;
   }
 
   sweepProcessedDistillJobs(now = new Date(), retentionDays = 30) {
@@ -996,15 +1142,22 @@ export class CortexStorage {
     `).get(normalizeProjectPath(projectPath)));
   }
 
+  // Name + path of every registered project. Feeds topicScope's identifying-vocabulary index.
+  listProjectProfiles() {
+    return this.db.prepare(
+      "SELECT project_path AS projectPath, name FROM project_profiles ORDER BY project_path",
+    ).all();
+  }
+
   insertTask(task) {
     const timestamp = nowIso();
     this.db.prepare(`
       INSERT INTO workflow_tasks (
         id, project_path, title, status, priority, assigned_agent, related_files,
-        acceptance_criteria, verification_command, evidence, branch, commit_sha,
+        acceptance_criteria, verification_command, deliverable, evidence, branch, commit_sha,
         block_reason, type, milestone_id, task_number, roadmap_order, scheduled_for,
         depends_on, not_before, completed_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id,
       normalizeProjectPath(task.projectPath),
@@ -1015,6 +1168,7 @@ export class CortexStorage {
       encodeList(task.relatedFiles),
       task.acceptanceCriteria || null,
       task.verificationCommand || null,
+      task.deliverable || null,
       task.evidence || null,
       task.branch || null,
       task.commitSha || null,
@@ -1049,6 +1203,7 @@ export class CortexStorage {
       encodeList(next.relatedFiles),
       next.acceptanceCriteria || null,
       next.verificationCommand || null,
+      next.deliverable || null,
       next.evidence || null,
       next.branch || null,
       next.commitSha || null,
@@ -1061,6 +1216,7 @@ export class CortexStorage {
       next.recheckAt ?? null,
       encodeList(next.dependsOn),
       next.notBefore ?? null,
+      next.groomedAt ?? null,
       next.status === "done" ? current.completedAt ?? timestamp : null,
       timestamp,
       id,
@@ -1075,6 +1231,7 @@ export class CortexStorage {
         related_files = ?,
         acceptance_criteria = ?,
         verification_command = ?,
+        deliverable = ?,
         evidence = ?,
         branch = ?,
         commit_sha = ?,
@@ -1087,6 +1244,7 @@ export class CortexStorage {
         recheck_at = ?,
         depends_on = ?,
         not_before = ?,
+        groomed_at = ?,
         completed_at = ?,
         updated_at = ?
       WHERE id = ?
@@ -1123,6 +1281,7 @@ export class CortexStorage {
         related_files AS relatedFiles,
         acceptance_criteria AS acceptanceCriteria,
         verification_command AS verificationCommand,
+        deliverable,
         evidence,
         branch,
         commit_sha AS commitSha,
@@ -1137,6 +1296,7 @@ export class CortexStorage {
         recheck_at AS recheckAt,
         depends_on AS dependsOn,
         not_before AS notBefore,
+        groomed_at AS groomedAt,
         completed_at AS completedAt,
         created_at AS createdAt,
         updated_at AS updatedAt
@@ -1158,6 +1318,7 @@ export class CortexStorage {
         related_files AS relatedFiles,
         acceptance_criteria AS acceptanceCriteria,
         verification_command AS verificationCommand,
+        deliverable,
         evidence,
         branch,
         commit_sha AS commitSha,
@@ -1172,6 +1333,7 @@ export class CortexStorage {
         recheck_at AS recheckAt,
         depends_on AS dependsOn,
         not_before AS notBefore,
+        groomed_at AS groomedAt,
         completed_at AS completedAt,
         created_at AS createdAt,
         updated_at AS updatedAt
@@ -1291,6 +1453,18 @@ export class CortexStorage {
       next.weeklyCapacity, next.status, next.activeRank ?? null, next.achievedAt ?? null, nowIso(), id,
     );
     return this.getGoal(id);
+  }
+
+  // Retire an abandoned goal's open tasks to backlog: they linked to the goal via its
+  // milestones, and leaving them `ready` keeps feeding the dispatcher work the human
+  // walked away from. In-progress/review/done tasks are left alone — they carry live
+  // work or evidence a human still needs to see.
+  demoteGoalTasksToBacklog(goalId) {
+    return this.db.prepare(`
+      UPDATE workflow_tasks SET status = 'backlog', updated_at = ?
+      WHERE status IN ('ready', 'blocked')
+        AND milestone_id IN (SELECT id FROM roadmap_milestones WHERE goal_id = ?)
+    `).run(nowIso(), goalId).changes;
   }
 
   insertMilestone(milestone) {
@@ -1537,6 +1711,41 @@ export class CortexStorage {
     return null;
   }
 
+  // "Supersedes: [m:xxxxxx]" marker resolution: the agent declares its new decision reverses a
+  // briefed one, so the pointer is written from a known small set instead of guessed by text
+  // similarity (which populated supersedes_id 0/815 times in the live DB).
+  findDecisionByPrefix(projectPath, idPrefix) {
+    const prefix = String(idPrefix || "").toLowerCase();
+    // ≥6 hex, same collision guard as quarantineRecordByPrefix
+    if (!/^[0-9a-f]{6,8}$/.test(prefix)) return null;
+    const row = this.db.prepare(`
+      SELECT id, decision, project_path AS projectPath
+      FROM decision_entries
+      WHERE project_path = ? AND replace(id, '-', '') LIKE ? || '%'
+    `).get(normalizeProjectPath(projectPath), prefix);
+    return row || null;
+  }
+
+  // Resolve a cited [m:xxxxxx] prefix to its owning record ACROSS projects. Citation credit
+  // must go to the record's own project — 17% of live citations resolved to a different
+  // project's record and were credited to the session's project, inflating its citation rate.
+  findRecordByPrefix(idPrefix) {
+    const prefix = String(idPrefix || "").toLowerCase();
+    // ≥6 hex, same collision guard as quarantineRecordByPrefix
+    if (!/^[0-9a-f]{6,8}$/.test(prefix)) return null;
+    for (const [table, recordType] of [
+      ["fix_entries", "fix"],
+      ["research_entries", "research"],
+      ["decision_entries", "decision"],
+    ]) {
+      const row = this.db.prepare(
+        `SELECT id, project_path AS projectPath FROM ${table} WHERE replace(id, '-', '') LIKE ? || '%'`,
+      ).get(prefix);
+      if (row) return { ...row, recordType };
+    }
+    return null;
+  }
+
   findCaptureByFingerprint(fingerprint) {
     for (const [table, recordType] of [
       ["fix_entries", "fix"],
@@ -1565,6 +1774,19 @@ export class CortexStorage {
     return this.getDecision(entry.id);
   }
 
+  listDecisionProjectPaths() {
+    return this.db.prepare("SELECT DISTINCT project_path AS projectPath FROM decision_entries")
+      .all().map((row) => row.projectPath);
+  }
+
+  // Backfill link for the pre-revision-gate cleanup: guarded so it never overwrites an
+  // existing chain link (re-pointing a record would resurrect whatever it pointed at).
+  supersedeDecision(newerId, olderId) {
+    return this.db.prepare(
+      "UPDATE decision_entries SET supersedes_id = ? WHERE id = ? AND supersedes_id IS NULL",
+    ).run(olderId, newerId).changes;
+  }
+
   getDecision(id) {
     return this.db.prepare(`
       SELECT id, project_path AS projectPath, agent, decision, rationale, alternatives,
@@ -1590,7 +1812,7 @@ export class CortexStorage {
         supersedes_id AS supersedesId, capture_source AS captureSource,
         quality_status AS qualityStatus, fingerprint, created_at AS createdAt
       FROM decision_entries WHERE ${clauses.join(" AND ")}
-      ORDER BY created_at DESC LIMIT ?
+      ORDER BY created_at DESC, rowid DESC LIMIT ?
     `).all(...params);
   }
 
@@ -1599,7 +1821,8 @@ export class CortexStorage {
   // by relevance to the files currently being worked on, same as listFixes/listResearch.
   listSupersededFixes(projectPath, { limit = 20 } = {}) {
     return decodeRows(this.db.prepare(`
-      SELECT old.id, old.summary, old.files_changed AS filesChanged, old.created_at AS createdAt, repl.summary AS supersededBy
+      SELECT old.id, old.summary, old.files_changed AS filesChanged, old.created_at AS createdAt,
+             repl.summary AS supersededBy, repl.created_at AS supersededAt
       FROM fix_entries repl
       JOIN fix_entries old ON repl.supersedes_id = old.id
       WHERE ${roadmapProjectPredicate("old")}
@@ -1667,6 +1890,13 @@ export class CortexStorage {
     return value;
   }
 
+  // Per-project settings are keyed by path ("autopilot.tier.c:/work/sitelogs"), so the roster
+  // has to be discoverable by prefix — there is no other list of which projects have one.
+  listSettingKeys(prefix) {
+    return this.db.prepare("SELECT key FROM hub_settings WHERE key LIKE ? ESCAPE '\\' ORDER BY key")
+      .all(`${String(prefix).replace(/[\\%_]/g, "\\$&")}%`).map((row) => row.key);
+  }
+
   // ---- runs ----
   startRun({ experimentId = null, taskId = null, evalTaskId = null, repetition = null, agent, workflowVersionId = null, verificationCommand = null, model = null }) {
     let vc = verificationCommand;
@@ -1693,7 +1923,9 @@ export class CortexStorage {
         tokens, tool_calls AS toolCalls, started_at AS startedAt, ended_at AS endedAt, outcome, notes,
         session_id AS sessionId, log_path AS logPath, last_event AS lastEvent,
         model, input_tokens AS inputTokens, output_tokens AS outputTokens, cost_usd AS costUsd,
-        worktree_path AS worktreePath, branch, pr_url AS prUrl
+        worktree_path AS worktreePath, branch, pr_url AS prUrl,
+        review_verdict AS reviewVerdict, review_notes AS reviewNotes,
+        auto_merged AS autoMerged, diff_confined AS diffConfined
       FROM runs WHERE id = ?
     `).get(id);
     if (row) {
@@ -1719,35 +1951,37 @@ export class CortexStorage {
     return this.getRun(id);
   }
 
-  // Task ids of runs still open (no ended_at) -- used by the startup worktree sweep to tell a
-  // legitimately in-flight run's worktree apart from one orphaned by a crash/kill. Called after
-  // interruptOpenRuns(), which closes every previously-open run, so this is normally empty at boot.
-  listOpenRunTaskIds() {
-    return this.db.prepare("SELECT task_id AS taskId FROM runs WHERE ended_at IS NULL AND task_id IS NOT NULL").all().map((r) => r.taskId);
-  }
-
-  interruptOpenRuns() {
-    const rows = this.db.prepare("SELECT id, task_id AS taskId FROM runs WHERE ended_at IS NULL").all();
-    return this.transaction(() => {
-      for (const row of rows) {
-        this.finishRun(row.id, { outcome: "fail", notes: "Interrupted by an unclean server restart" });
-        if (row.taskId) {
-          // recheck_at = today so restart-orphaned work surfaces in the Needs-you Recheck
-          // bucket instead of rotting per-project until someone opens that exact project.
-          this.updateTask(row.taskId, { status: "blocked", blockReason: "Automated run was interrupted by a server restart", recheckAt: localToday() });
-          this.clearLease(row.taskId);
-        }
-      }
-      return rows.length;
-    });
-  }
-
-  finishRun(id, { verificationExit = null, tokens = null, toolCalls = null, outcome = null, notes = null, model = null, inputTokens = null, outputTokens = null, costUsd = null, prUrl = null } = {}) {
+  finishRun(id, { verificationExit = null, tokens = null, toolCalls = null, outcome = null, notes = null, model = null, inputTokens = null, outputTokens = null, costUsd = null, prUrl = null, reviewVerdict = null, reviewNotes = null, diffConfined = null } = {}) {
     const current = this.getRun(id);
-    const result = this.db.prepare("UPDATE runs SET verification_exit = ?, tokens = ?, tool_calls = ?, outcome = ?, notes = ?, model = ?, input_tokens = ?, output_tokens = ?, cost_usd = ?, pr_url = ?, ended_at = ? WHERE id = ?")
-      .run(verificationExit, tokens, toolCalls, outcome, notes, model, inputTokens, outputTokens, costUsd, prUrl ?? current?.prUrl ?? null, nowIso(), id);
+    const result = this.db.prepare("UPDATE runs SET verification_exit = ?, tokens = ?, tool_calls = ?, outcome = ?, notes = ?, model = ?, input_tokens = ?, output_tokens = ?, cost_usd = ?, pr_url = ?, review_verdict = ?, review_notes = ?, diff_confined = ?, ended_at = ? WHERE id = ?")
+      .run(verificationExit, tokens, toolCalls, outcome, notes, model, inputTokens, outputTokens, costUsd, prUrl ?? current?.prUrl ?? null, reviewVerdict, reviewNotes, diffConfined === null ? null : (diffConfined ? 1 : 0), nowIso(), id);
     if (result.changes === 0) throw new Error(`Run not found: ${id}`);
     return this.getRun(id);
+  }
+
+  // Auto-merge resolves after finishRun (the merge needs the worktree torn down first),
+  // so its outcome lands as a follow-up stamp on the already-finished run row.
+  markRunAutoMerged(id, merged) {
+    this.db.prepare("UPDATE runs SET auto_merged = ? WHERE id = ?").run(merged ? 1 : 0, id);
+    return this.getRun(id);
+  }
+
+  // Throughput rollup for the last N days: is the pipeline producing merged, verified work,
+  // and does the human's approval load have data behind it? Grouped by ISO week start (Mon).
+  weeklyRunRollup({ weeks = 4, now = new Date() } = {}) {
+    const since = new Date(now.getTime() - weeks * 7 * 86_400_000).toISOString();
+    return this.db.prepare(`
+      SELECT
+        date(started_at, '-6 days', 'weekday 1') AS weekStart,
+        COUNT(*) AS runs,
+        SUM(outcome = 'success') AS successes,
+        SUM(verification_exit = 0) AS verifiedGreen,
+        SUM(review_verdict = 'clean') AS reviewerClean,
+        SUM(auto_merged = 1) AS autoMerged,
+        ROUND(COALESCE(SUM(cost_usd), 0), 2) AS costUsd
+      FROM runs WHERE started_at >= ?
+      GROUP BY weekStart ORDER BY weekStart DESC
+    `).all(since);
   }
 
   // Spend analytics: totals plus breakdowns by model, project, and task type, newest days first.
@@ -1773,22 +2007,6 @@ export class CortexStorage {
       GROUP BY key ORDER BY key DESC LIMIT 30
     `).all(...params);
     return { total, byModel: breakdown("r.model"), byProject: breakdown("t.project_path"), byType: breakdown("t.type"), byDay };
-  }
-
-  // One-time: populate cost/tokens/model for finished runs from their on-disk logs, so the
-  // spend dashboard reflects history captured before this feature existed. `parse(logPath)`
-  // returns { model, inputTokens, outputTokens, tokens, costUsd } | null (injected: keeps fs out of storage).
-  backfillRunCosts({ parse }) {
-    const rows = this.db.prepare("SELECT id, log_path AS logPath FROM runs WHERE cost_usd IS NULL AND log_path IS NOT NULL").all();
-    let updated = 0;
-    for (const { id, logPath } of rows) {
-      const u = parse(logPath);
-      if (!u || u.costUsd == null) continue;
-      this.db.prepare("UPDATE runs SET model = ?, input_tokens = ?, output_tokens = ?, tokens = ?, cost_usd = ? WHERE id = ?")
-        .run(u.model ?? null, u.inputTokens ?? null, u.outputTokens ?? null, u.tokens ?? null, u.costUsd, id);
-      updated += 1;
-    }
-    return updated;
   }
 
   listRuns(projectPath, { limit = 100 } = {}) {
@@ -1883,17 +2101,28 @@ export class CortexStorage {
     return id;
   }
 
-  listMetrics(projectPath, { since, kind, limit } = {}) {
+  listMetrics(projectPath, { since, kind, limit, sessionId } = {}) {
     const clauses = ["project_path = ?"];
     const params = [normalizeProjectPath(projectPath)];
     if (since) { clauses.push("created_at >= ?"); params.push(since); }
     if (kind) { clauses.push("kind = ?"); params.push(kind); }
+    // Session-scoped reads: a fixed row-limit window shared by all concurrent sessions (main
+    // session + subagents + scheduled tasks) routinely missed the current session's rows —
+    // 599 distinct session ids hit this project in 14 days, so limit:20 was near-useless.
+    if (sessionId) { clauses.push("json_extract(payload_json, '$.sessionId') = ?"); params.push(sessionId); }
     // ponytail: limit defaults to unbounded so computeStats keeps all events; only the activity feed clamps it.
     let sql = `
       SELECT id, project_path AS projectPath, kind, payload_json AS payloadJson, created_at AS createdAt
       FROM metrics_events WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC`;
     if (limit) { sql += " LIMIT ?"; params.push(limit); }
     return this.db.prepare(sql).all(...params).map((row) => ({ ...row, payload: safeParse(row.payloadJson) }));
+  }
+
+  // Machine-wide count for the capture-liveness alarm — no project filter on purpose:
+  // a blackout (auth expiry, dead hooks) silences every project at once.
+  countRecentMetrics(kind, sinceMs) {
+    return this.db.prepare("SELECT COUNT(*) AS n FROM metrics_events WHERE kind = ? AND created_at >= ?")
+      .get(kind, new Date(Date.now() - sinceMs).toISOString()).n;
   }
 
   // Unified activity feed across the whole DB (every timestamped table), filtered in SQL.

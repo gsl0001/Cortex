@@ -59,3 +59,25 @@ test("roadmap proposal-add with a missing --file fails with a clean message, not
     assert.doesNotMatch(result.err, /ENOENT|"path" argument/);
   });
 });
+
+test("doctor --portfolio prints a concise report and lifecycle updates round-trip", async () => {
+  await withDb(async (dbPath, dir) => {
+    const profile = run(dbPath, [
+      "profile", "upsert", "--project", dir, "--name", "Demo", "--mode", "product", "--summary", "Demo",
+    ]);
+    assert.equal(profile.code, 0, profile.err);
+
+    const lifecycle = run(dbPath, ["project", "lifecycle", "--project", dir, "--state", "maintenance", "--json"]);
+    assert.equal(lifecycle.code, 0, lifecycle.err);
+    assert.equal(JSON.parse(lifecycle.out).state, "maintenance");
+
+    const doctor = run(dbPath, ["doctor", "--portfolio", "--today", "2026-07-30"]);
+    assert.equal(doctor.code, 0, doctor.err);
+    assert.match(doctor.out, /Portfolio Doctor - 2026-07-30/);
+    assert.match(doctor.out, /\[maintenance\] Demo/);
+
+    const json = run(dbPath, ["doctor", "--portfolio", "--today", "2026-07-30", "--json"]);
+    assert.equal(json.code, 0, json.err);
+    assert.equal(JSON.parse(json.out).rows[0].lifecycle, "maintenance");
+  });
+});

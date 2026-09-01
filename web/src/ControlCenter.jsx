@@ -3,15 +3,23 @@ import { api } from "./api.js";
 import { Evidence } from "./evidence.jsx";
 
 const HUMAN = "human"; // UI-origin writes; server requires an agent field
-const DISPATCH_AGENTS = new Set(["codex", "claude-code"]);
-const PRIORITY_RANK = { urgent: 0, high: 1, normal: 2, medium: 2, low: 3 };
+
+// Autonomy tiers (src/tiers.js), lowest first, each with the one line that says what granting
+// it actually costs you. The dial replaced a binary ON/OFF that could only mean "auto or not".
+const TIERS = ["watch", "plan", "assist", "auto"];
+const TIER_MEANING = {
+  watch: "observe only — no agent is launched",
+  plan: "propose plans and flag stalls",
+  assist: "do work, a human merges",
+  auto: "full auto within confinement",
+};
 
 // ---- small time/date helpers (mirror the server's local-calendar math) ----
 function today() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
-// relative "Xs/Xm ago"; null-safe for a dispatcher that never ticked
+// relative "Xs/Xm ago"; null-safe
 function agoLabel(iso) {
   if (!iso) return "never";
   const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
@@ -35,21 +43,8 @@ function ticker(text) {
   const clean = text.replace(/\s+/g, " ");
   return clean.length > 80 ? `${clean.slice(0, 77)}…` : clean;
 }
-function shortId(id) {
-  return id ? String(id).slice(0, 8) : null;
-}
 function fmtUsd(n) {
   return n == null ? "—" : n === 0 ? "$0" : `$${n.toFixed(2)}`;
-}
-// Why a queued task hasn't dispatched yet, beyond "on deck": an unmet dependency
-// (producer not yet review/done) or a notBefore earliest-start time still in the future.
-function gateReason(task, tasksById) {
-  const unmet = (task.dependsOn || []).filter((id) => {
-    const p = tasksById.get(id); return !p || (p.status !== "review" && p.status !== "done");
-  });
-  if (unmet.length) return `waiting on: ${unmet.map((id) => tasksById.get(id)?.title || id).slice(0, 2).join(", ")}`;
-  if (task.notBefore && new Date(task.notBefore) > new Date()) return `not before ${new Date(task.notBefore).toTimeString().slice(0, 5)}`;
-  return null;
 }
 function fmtTok(n) {
   if (n == null) return "—";
@@ -78,9 +73,8 @@ function CostBars({ title, rows, label }) {
   );
 }
 
-// agent · type · model chips shared by the running / queued / failed cards. The model
-// comes from the read model (task.model = settings-resolved routing, run.model =
-// intended-then-actual) — no mirrored routing map in the UI.
+// agent · type · model chips shared by the history / blocked cards (model = what a
+// past run actually reported).
 function AgentChips({ agent, type, model }) {
   return (
     <span className="cc-chips">
@@ -91,19 +85,9 @@ function AgentChips({ agent, type, model }) {
   );
 }
 
-// Enrolled paths return slash- and case-normalized; the projects list keeps raw Windows
-// paths (mixed \ and /). Compare on this key so enrollment state matches — mirrors
-// src/agentLauncher.js autopilotKey.
+// Cost/run project paths arrive slash- and case-normalized; the projects list keeps raw
+// Windows paths (mixed \ and /). Compare on this key — mirrors src/tiers.js autopilotKey.
 const autopilotKey = (path) => String(path || "").toLowerCase().replaceAll("\\", "/");
-
-// Autopilot will actually pick this up next: ready + agent-assigned + due + enrolled.
-// Mirrors src/dispatcher.js isDispatchable, plus the enrollment gate.
-function isQueued(task, enrolled) {
-  return task.status === "ready"
-    && DISPATCH_AGENTS.has(task.assignedAgent)
-    && (!task.scheduledFor || task.scheduledFor <= today())
-    && enrolled.has(autopilotKey(task.projectPath));
-}
 
 export default function ControlCenter({ projects }) {
   const [data, setData] = useState(null);       // /needs-you
@@ -112,6 +96,9 @@ export default function ControlCenter({ projects }) {
   const [overview, setOverview] = useState(null); // /overview KPIs
   const [settings, setSettings] = useState(null); // /settings config
   const [costs, setCosts] = useState(null); // /costs spend analytics
+  // Re-read on this panel's own poll (the prop is fetched once at app boot): a tier write has
+  // to show its new value back, and another session's change has to land here too.
+  const [projectRows, setProjectRows] = useState(null);
   const [error, setError] = useState("");
   const [rejectingId, setRejectingId] = useState("");
   const [reason, setReason] = useState("");
@@ -141,8 +128,9 @@ export default function ControlCenter({ projects }) {
     api("/needs-you"), api("/runs"), api("/tasks"), api("/overview"), api("/settings"),
     // non-fatal: an older backend without /costs must not blank the whole dashboard
     api("/costs").catch(() => null),
+    api("/projects"),
   ])
-    .then(([d, r, t, o, s, c]) => { setData({ ...d }); setRuns(r); setTasks(t); setOverview({ ...o }); setSettings({ ...s }); setCosts(c); })
+    .then(([d, r, t, o, s, c, p]) => { setData({ ...d }); setRuns(r); setTasks(t); setOverview({ ...o }); setSettings({ ...s }); setCosts(c); setProjectRows(p); })
     .catch((e) => setError(e.message));
   useEffect(() => { refresh(); }, []);
 
@@ -173,21 +161,20 @@ export default function ControlCenter({ projects }) {
 
   if (!data) return <section className="cc"><p className="cc-loading">{error || "Loading…"}</p></section>;
 
-  const { reviews = [], inbox = [], guard = [], dispatcher = {} } = data;
+  const { reviews = [], inbox = [], guard = [] } = data;
   // Guard verdicts get their own card; drop them from the plain Decisions/Failed lists so a
   // memory-governance block or warn shows once, with its reason and matched memory context.
   const guardIds = new Set(guard.map((g) => g.id));
   // Match on autopilotKey: cost/run project paths arrive slash-normalized, the projects list
   // keeps raw Windows paths, so an exact === would miss and fall back to a bare basename.
-  const projectName = (path) => projects?.find((p) => autopilotKey(p.projectPath) === autopilotKey(path))?.name || basename(path);
+  const allProjects = projectRows || projects || [];
+  const projectName = (path) => allProjects.find((p) => autopilotKey(p.projectPath) === autopilotKey(path))?.name || basename(path);
   const titleForTask = (id) => tasks.find((t) => t.id === id)?.title;
-  const enrolledSet = new Set((dispatcher.projects || []).map(autopilotKey));
-  const enrolledCount = (projects || []).filter((p) => enrolledSet.has(autopilotKey(p.projectPath))).length;
+  const tierOf = (p) => p.tier || "watch";
+  const autoCount = allProjects.filter((p) => tierOf(p) === "auto").length;
 
-  // Run states: no endedAt = RUNNING; ended success = DONE; ended fail = FAILED.
+  // Run states: no endedAt = RUNNING (legacy open rows only); ended success = DONE; else FAILED.
   const runState = (run) => (!run.endedAt ? "running" : run.outcome === "success" ? "done" : "failed");
-  const running = runs.filter((r) => runState(r) === "running");
-  const activeRuns = running.length;
 
   // History = every finished run, newest first (done + failed). The right-hand archive;
   // each is a collapsible <details> so a long night of runs stays scannable.
@@ -215,31 +202,13 @@ export default function ControlCenter({ projects }) {
           <div className="cc-hist-meta mono">{meta.join(" · ")}</div>
           {run.notes && <p className="cc-hist-notes">{run.notes}</p>}
           <button className="cc-btn cc-btn-sm" aria-label={`View log for ${title}`} onClick={() => openLog(run)}>View log</button>
-          {run.prUrl
-            ? <a className="cc-run-pr" href={run.prUrl} target="_blank" rel="noreferrer">PR ↗</a>
-            : run.branch
-              ? <button className="cc-btn cc-btn-sm" disabled={busy} title={`Merge ${run.branch}`}
-                  onClick={() => act(() => api(`/runs/${encodeURIComponent(run.id)}/merge`, {
-                    method: "POST", headers: { "content-type": "application/json" },
-                    body: JSON.stringify({ agent: HUMAN }),
-                  }))}>Merge</button>
-              : null}
+          {run.prUrl && <a className="cc-run-pr" href={run.prUrl} target="_blank" rel="noreferrer">PR ↗</a>}
         </div>
       </details>
     );
   };
 
-  // Lookup for resolving dependsOn ids to their task (status/title) when annotating gate reasons.
-  const tasksById = new Map(tasks.map((t) => [t.id, t]));
-
-  // Queued = tasks Autopilot will dispatch next, in a stable priority-then-date order so the
-  // numbering reflects a real "on deck" sequence, not render order.
-  const queuedTasks = tasks
-    .filter((t) => isQueued(t, enrolledSet))
-    .sort((a, b) => (PRIORITY_RANK[a.priority] ?? 9) - (PRIORITY_RANK[b.priority] ?? 9)
-      || String(a.scheduledFor || "").localeCompare(String(b.scheduledFor || "")));
-
-  // Failed = tasks currently blocked (one row each, newest-touched first), actionable via Retry.
+  // Blocked = tasks currently blocked (one row each, newest-touched first), actionable via Retry.
   // Guard blocks are shown in the Memory Guard card instead, so exclude them here.
   const failedTasks = tasks
     .filter((t) => t.status === "blocked" && !guardIds.has(t.id))
@@ -252,10 +221,10 @@ export default function ControlCenter({ projects }) {
   const capturedToday = overview ? overview.capturedToday : null;
   const durableMemories = overview ? overview.durableMemories : null;
 
-  const enabled = !!dispatcher.enabled;
-  const setDispatcher = (patch) => act(() => api("/dispatcher", {
+  // Autonomy is written per project as a tier. The server rejects a pinned project per item.
+  const setTier = (projectPath, tier) => act(() => api("/projects/tier", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ agent: HUMAN, ...patch }),
+    body: JSON.stringify({ agent: HUMAN, projectPath, tier }),
   }));
 
   // ---- capture-policy toggle rows (persist to /settings; not yet consumed by the pipeline) ----
@@ -275,36 +244,16 @@ export default function ControlCenter({ projects }) {
         <div className="cc-brand">
           <span className="cc-logo" aria-hidden="true">C</span>
           <span className="cc-brand-text">
-            <strong>Autopilot Control</strong>
-            <span className="cc-brand-sub">Cortex · agent orchestration</span>
+            <strong>Control Center</strong>
+            <span className="cc-brand-sub">Cortex · decisions &amp; capture</span>
           </span>
         </div>
 
-        <span className={`cc-status-pill ${enabled ? "armed" : "paused"}`}>
-          <span className="cc-status-dot" aria-hidden="true" />
-          {enabled ? "Autopilot armed" : "Autopilot paused"}
-        </span>
-
         <div className="cc-header-right">
           <div className="cc-stat">
-            <strong className="mono">{activeRuns}</strong>
-            <span className="cc-stat-label">live / AGENTS</span>
+            <strong className="mono">{decisionsQueued}</strong>
+            <span className="cc-stat-label">decisions / AWAITING YOU</span>
           </div>
-          <div className="cc-stat">
-            <strong className="mono">{queuedTasks.length}</strong>
-            <span className="cc-stat-label">queued / TO DISPATCH</span>
-          </div>
-          <button
-            className="cc-btn cc-btn-pause"
-            disabled={busy}
-            onClick={() => setDispatcher({ enabled: !enabled })}
-          >{enabled ? "‖ Pause" : "▶ Resume"}</button>
-          <button
-            className="cc-btn cc-btn-stop"
-            disabled={busy}
-            title="Pauses dispatch and kills any running agents"
-            onClick={() => setDispatcher({ enabled: false, stopActive: true })}
-          >■ EMERGENCY STOP</button>
         </div>
       </header>
 
@@ -313,16 +262,12 @@ export default function ControlCenter({ projects }) {
       {/* ---------- KPI strip ---------- */}
       <div className="cc-kpis">
         <div className="cc-kpi">
-          <span className="cc-kpi-num mono">{activeRuns} <em className="pos">live</em></span>
-          <span className="cc-kpi-label">Agents running</span>
-        </div>
-        <div className="cc-kpi">
           <span className="cc-kpi-num mono">{decisionsQueued} <em className="act">action</em></span>
           <span className="cc-kpi-label">Decisions queued</span>
         </div>
         <div className="cc-kpi">
           <span className="cc-kpi-num mono">{failedTasks.length} <em className="neg">attention</em></span>
-          <span className="cc-kpi-label">Runs blocked</span>
+          <span className="cc-kpi-label">Tasks blocked</span>
         </div>
         <div className="cc-kpi">
           <span className="cc-kpi-num mono">{capturedToday == null ? "—" : capturedToday}</span>
@@ -478,97 +423,18 @@ export default function ControlCenter({ projects }) {
             </section>
           )}
 
-          {/* 2. Running agents — live work */}
-          <section className="cc-card cc-card-running" aria-label="Running agents">
-            <div className="cc-card-head">
-              <span className={`cc-card-mark ${running.length ? "live" : ""}`} aria-hidden="true" />
-              <h2>Running agents</h2>
-              <span className="cc-pill cc-pill-green">● {running.length} live</span>
-            </div>
-            {running.length === 0 && <p className="cc-empty">No agents running right now.</p>}
-            {running.map((run) => {
-              const task = tasks.find((t) => t.id === run.taskId);
-              const title = titleForTask(run.taskId) || run.taskId || "Agent run";
-              const meta = [
-                basename(run.projectPath || task?.projectPath),
-                elapsed(run.startedAt),
-                run.sessionId ? `session ${shortId(run.sessionId)}` : null,
-              ].filter(Boolean);
-              return (
-                <article key={run.id} className="cc-run cc-run-running">
-                  <div className="cc-run-row1">
-                    <span className="cc-badge cc-badge-running">RUNNING</span>
-                    <span className="cc-run-title">{title}</span>
-                    <span className="cc-run-right">
-                      {run.prUrl
-                        ? <a className="cc-run-pr" href={run.prUrl} target="_blank" rel="noreferrer">PR ↗</a>
-                        : run.branch
-                          ? <button className="cc-btn cc-btn-sm" disabled={busy} title={`Merge ${run.branch}`}
-                              onClick={() => act(() => api(`/runs/${encodeURIComponent(run.id)}/merge`, {
-                                method: "POST", headers: { "content-type": "application/json" },
-                                body: JSON.stringify({ agent: HUMAN }),
-                              }))}>Merge</button>
-                          : null}
-                      <button
-                        className="cc-btn cc-btn-sm"
-                        aria-label={`View log for ${title}`}
-                        onClick={() => openLog(run)}
-                      >View log</button>
-                      <button
-                        className="cc-btn cc-btn-sm"
-                        disabled={busy}
-                        title="Kill this agent; its task moves to Failed"
-                        onClick={() => act(() => api(`/runs/${encodeURIComponent(run.id)}/stop`, {
-                          method: "POST", headers: { "content-type": "application/json" },
-                          body: JSON.stringify({ agent: HUMAN }),
-                        }))}
-                      >Stop</button>
-                    </span>
-                  </div>
-                  <AgentChips agent={run.agent} type={task?.type} model={run.model || task?.model} />
-                  <div className="cc-run-meta mono">{meta.join(" · ")}</div>
-                  {ticker(run.lastEvent) && <div className="cc-run-ticker mono">{ticker(run.lastEvent)}</div>}
-                  <div className="cc-run-track"><div className="cc-run-fill cc-run-fill-running" /></div>
-                </article>
-              );
-            })}
-          </section>
-
-          {/* 3. Queued to dispatch — the on-deck sequence Autopilot pulls next */}
-          <section className="cc-card cc-card-queued" aria-label="Queued to dispatch">
+          {/* 2. Blocked tasks — needing a decision or retry */}
+          <section className="cc-card cc-card-failed" aria-label="Blocked tasks">
             <div className="cc-card-head">
               <span className="cc-card-mark" aria-hidden="true" />
-              <h2>Queued to dispatch</h2>
-              <span className="cc-pill cc-pill-blue">{queuedTasks.length} waiting</span>
-              <span className="cc-card-meta">ready · agent-assigned · due · enrolled</span>
-            </div>
-            {queuedTasks.length === 0 && <p className="cc-empty">Nothing queued — assign an agent and enroll the project.</p>}
-            {queuedTasks.map((task, i) => (
-              <article key={task.id} className="cc-queue-row">
-                <span className="cc-queue-num mono" aria-hidden="true">{i + 1}</span>
-                <span className="cc-queue-body">
-                  <span className="cc-queue-title">{task.title}</span>
-                  <AgentChips agent={task.assignedAgent} type={task.type} model={task.model} />
-                  <span className="cc-queue-meta mono">{projectName(task.projectPath)}{task.scheduledFor ? ` · ${task.scheduledFor}` : ""}</span>
-                  {gateReason(task, tasksById) && <span className="cc-queue-gate">{gateReason(task, tasksById)}</span>}
-                </span>
-                {task.priority && task.priority !== "normal" && <span className={`cc-prio cc-prio-${task.priority}`}>{task.priority}</span>}
-              </article>
-            ))}
-          </section>
-
-          {/* 4. Failed runs — blocked tasks needing a decision or retry */}
-          <section className="cc-card cc-card-failed" aria-label="Failed runs">
-            <div className="cc-card-head">
-              <span className="cc-card-mark" aria-hidden="true" />
-              <h2>Failed runs</h2>
+              <h2>Blocked tasks</h2>
               <span className="cc-pill cc-pill-red">{failedTasks.length} need attention</span>
             </div>
-            {failedTasks.length === 0 && <p className="cc-empty">No failed runs. All clear.</p>}
+            {failedTasks.length === 0 && <p className="cc-empty">Nothing blocked. All clear.</p>}
             {failedTasks.map((task) => (
               <article key={task.id} className="cc-run cc-run-failed">
                 <div className="cc-run-row1">
-                  <span className="cc-badge cc-badge-failed">FAILED</span>
+                  <span className="cc-badge cc-badge-failed">BLOCKED</span>
                   <span className="cc-run-title">{task.title}</span>
                   <span className="cc-run-right">
                     <button
@@ -579,6 +445,13 @@ export default function ControlCenter({ projects }) {
                   </span>
                 </div>
                 {task.blockReason && <div className="cc-run-reason">{ticker(task.blockReason)}</div>}
+                {/* A block with no way back was the failure mode: show the date it comes back,
+                    and say so loudly once that date has arrived. */}
+                {task.recheckAt && (
+                  <div className={`cc-run-recheck mono ${task.recheckAt <= today() ? "due" : ""}`}>
+                    {task.recheckAt <= today() ? `recheck due ${task.recheckAt}` : `rechecks ${task.recheckAt}`}
+                  </div>
+                )}
                 <AgentChips agent={task.assignedAgent} type={task.type} model={task.model} />
                 <div className="cc-run-meta mono">{projectName(task.projectPath)}</div>
               </article>
@@ -588,37 +461,45 @@ export default function ControlCenter({ projects }) {
 
         {/* ---------- Right sidebar ---------- */}
         <aside className="cc-sidebar">
-          {/* Projects — collapsible dropdown so a long enrollment list doesn't crowd the sidebar */}
+          {/* Projects — one autonomy tier per project, collapsible so a long list doesn't crowd */}
           <details className="cc-panel cc-projects">
             <summary className="cc-projects-sum">
-              <span className="cc-caps">Projects</span>
-              <span className="cc-projects-count mono">{enrolledCount} / {(projects || []).length} on</span>
+              <span className="cc-caps">Autonomy</span>
+              <span className="cc-projects-count mono">{autoCount} / {allProjects.length} auto</span>
             </summary>
             <div className="cc-projects-list">
-              {(projects || []).map((p) => {
-                const on = enrolledSet.has(autopilotKey(p.projectPath));
+              <dl className="cc-tier-legend">
+                {TIERS.map((t) => (
+                  <div key={t} className="cc-tier-legend-row">
+                    <dt className="mono">{t}</dt>
+                    <dd>{TIER_MEANING[t]}</dd>
+                  </div>
+                ))}
+              </dl>
+              {allProjects.map((p) => {
+                const tier = tierOf(p);
                 return (
                   <div key={p.projectPath} className="cc-project-row">
-                    <span className={`cc-project-dot ${on ? "on" : ""}`} aria-hidden="true" />
-                    <span className="cc-project-name mono">{p.name}</span>
-                    <button
-                      className={`cc-toggle-btn ${on ? "on" : ""}`}
-                      aria-label={`${on ? "Unenroll" : "Enroll"} ${p.name}`}
-                      aria-pressed={on}
-                      disabled={busy}
-                      onClick={() => {
-                        // POST the full updated projects array; never auto-add a NEVER_AUTOPILOT repo.
-                        // Compare on autopilotKey so a differently-cased/separated path still matches.
-                        const next = on
-                          ? (dispatcher.projects || []).filter((x) => autopilotKey(x) !== autopilotKey(p.projectPath))
-                          : [...(dispatcher.projects || []), p.projectPath];
-                        setDispatcher({ projects: next });
-                      }}
-                    >{on ? "ON" : "OFF"}</button>
+                    <span className={`cc-project-dot ${tier === "auto" ? "on" : ""}`} aria-hidden="true" />
+                    <span className="cc-project-name mono">
+                      {p.name}
+                      {p.pinned && <span className="cc-project-lock" aria-hidden="true"> 🔒</span>}
+                    </span>
+                    <select
+                      className={`cc-tier-select cc-tier-${tier}`}
+                      aria-label={`Autonomy tier for ${p.name}`}
+                      value={tier}
+                      title={TIER_MEANING[tier]}
+                      disabled={busy || !!p.pinned}
+                      onChange={(e) => setTier(p.projectPath, e.target.value)}
+                    >
+                      {TIERS.map((t) => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                    {p.pinned && <p className="cc-project-pinned-note">Live-money repo — pinned at watch; it can never be promoted here.</p>}
                   </div>
                 );
               })}
-              {(projects || []).length === 0 && <p className="cc-empty">No projects.</p>}
+              {allProjects.length === 0 && <p className="cc-empty">No projects.</p>}
             </div>
           </details>
 
@@ -671,51 +552,10 @@ export default function ControlCenter({ projects }) {
             </div>
           </details>
 
-          {/* Scheduler — run window (Memory Guard enforcement lives in the launcher) */}
-          <details className="cc-panel cc-sched">
-            <summary className="cc-projects-sum">
-              <span className="cc-caps">Scheduler</span>
-              <span className="cc-projects-count mono">{dispatcher.window ? (dispatcher.windowOpen ? "window open" : "window closed") : "always-on"}</span>
-            </summary>
-            <div className="cc-sched-body">
-              <label className="cc-toggle-row">
-                <span className="cc-toggle-text"><strong>Run window</strong><span className="cc-toggle-sub">Only dispatch during these hours</span></span>
-                <span className={`cc-switch ${dispatcher.window ? "on" : ""}`}>
-                  <input type="checkbox" aria-label="Enable run window" checked={!!dispatcher.window} disabled={busy}
-                    onChange={(e) => setDispatcher({ window: e.target.checked ? { start: "22:00", end: "07:00", days: [0,1,2,3,4,5,6] } : null })} />
-                  <span className="cc-switch-knob" aria-hidden="true" />
-                </span>
-              </label>
-              {dispatcher.window && (
-                <div className="cc-sched-window mono">
-                  <input aria-label="Window start" type="time" value={dispatcher.window.start}
-                    onChange={(e) => setDispatcher({ window: { ...dispatcher.window, start: e.target.value } })} />
-                  <span>→</span>
-                  <input aria-label="Window end" type="time" value={dispatcher.window.end}
-                    onChange={(e) => setDispatcher({ window: { ...dispatcher.window, end: e.target.value } })} />
-                </div>
-              )}
-              <div className="cc-sched-conc">
-                <label className="cc-toggle-row">
-                  <span className="cc-toggle-text"><strong>Max concurrent runs</strong><span className="cc-toggle-sub">Across all projects</span></span>
-                  <input className="cc-num" type="number" min="1" max="10" aria-label="Max concurrent runs"
-                    value={dispatcher.maxConcurrent ?? 1} disabled={busy}
-                    onChange={(e) => setDispatcher({ maxConcurrent: Math.max(1, Number(e.target.value) || 1) })} />
-                </label>
-                <label className="cc-toggle-row">
-                  <span className="cc-toggle-text"><strong>Max per project</strong><span className="cc-toggle-sub">Parallel runs in one project</span></span>
-                  <input className="cc-num" type="number" min="1" max="5" aria-label="Max per project"
-                    value={dispatcher.maxPerProject ?? 1} disabled={busy}
-                    onChange={(e) => setDispatcher({ maxPerProject: Math.max(1, Number(e.target.value) || 1) })} />
-                </label>
-              </div>
-            </div>
-          </details>
-
-          {/* Capture policy — what autopilot keeps vs. discards */}
+          {/* Capture policy — what the hub keeps vs. discards */}
           <div className="cc-panel">
             <p className="cc-caps">Capture policy</p>
-            <p className="cc-panel-sub">What autopilot keeps vs. discards</p>
+            <p className="cc-panel-sub">What the hub keeps vs. discards</p>
             {toggleRows.map((row) => {
               const on = policy[row.key] !== undefined ? !!policy[row.key] : row.key !== "capturePolicy.genericChatter";
               return (

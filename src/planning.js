@@ -84,6 +84,29 @@ export function isProjectStalled({ tasks, today }) {
   return open.length > 0 && lastProgress ? ageInDays(lastProgress, today) >= 7 : false;
 }
 
+// isProjectStalled above answers "is this ROADMAP stuck", which needs tasks to exist. The
+// portfolio has the opposite problem: 21 projects produce records, 4 have any task at all.
+// Frontboard shipped code on Jul 23, the video factory on Jul 25, dev-dist on Jul 22 — all
+// with zero tasks, so the work is real and recent but nothing can schedule or report on it.
+// A project that is being worked on and has no open task is the loudest intake signal there
+// is, and it is invisible to every existing check.
+const ACTIVE_WITHIN_DAYS = 7;
+export function portfolioStalls(projects = [], { today, activeWithinDays = ACTIVE_WITHIN_DAYS } = {}) {
+  if (!today) throw new Error("today is required");
+  return projects
+    .map(({ projectPath, tier, lastRecordAt, tasks = [] }) => {
+      const open = tasks.filter(({ status }) => status !== "done").length;
+      const recentlyActive = lastRecordAt ? ageInDays(lastRecordAt, today) <= activeWithinDays : false;
+      const blockedOnly = open > 0 && tasks.filter(({ status }) => status !== "done").every(({ status }) => status === "blocked");
+      // "no tasks at all" and "every task is blocked" are the same problem wearing two faces:
+      // nothing can be picked up next. Report them apart so the digest can say which.
+      const reason = !recentlyActive ? null : open === 0 ? "no-open-tasks" : blockedOnly ? "all-blocked" : null;
+      return reason ? { projectPath, tier, lastRecordAt, openTasks: open, reason } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => String(b.lastRecordAt).localeCompare(String(a.lastRecordAt)));
+}
+
 export function selectNextAction(tasks, milestoneDueDates = {}, today) {
   if (!today) throw new Error("today is required");
   const dueDate = (task) => milestoneDueDates instanceof Map

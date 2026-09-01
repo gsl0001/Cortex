@@ -131,7 +131,7 @@ test("migrates the legacy schema without losing records", async () => {
     const milestoneColumns = storage.db.prepare("PRAGMA table_info(roadmap_milestones)").all();
     const runColumns = storage.db.prepare("PRAGMA table_info(runs)").all().map(({ name }) => name);
 
-    assert.equal(version.version, 19);
+    assert.equal(version.version, 23);
     assert.equal(runColumns.includes("session_id"), true);
     assert.equal(runColumns.includes("log_path"), true);
     assert.equal(runColumns.includes("last_event"), true);
@@ -207,7 +207,7 @@ test("migrates the legacy schema without losing records", async () => {
     storage = undefined;
 
     reopened = new CortexStorage({ dbPath });
-    assert.equal(reopened.db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count, 18);
+    assert.equal(reopened.db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count, 22);
     assert.equal(reopened.db.prepare("SELECT COUNT(*) AS count FROM fix_entries").get().count, 1);
     reopened.close();
     reopened = undefined;
@@ -223,7 +223,7 @@ test("upgrades a version 8 database with immutable task completion time", async 
   let storage;
   try {
     storage = new CortexStorage({ dbPath });
-    assert.equal(storage.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get().version, 19);
+    assert.equal(storage.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get().version, 23);
     assert.equal(
       storage.db.prepare("PRAGMA table_info(workflow_tasks)").all().some(({ name }) => name === "completed_at"),
       true,
@@ -304,8 +304,9 @@ test("upgrades a version 9 database with immutable goal achievement time", async
   let storage;
   try {
     storage = new CortexStorage({ dbPath });
-    assert.equal(storage.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get().version, 19);
+    assert.equal(storage.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get().version, 23);
     assert.equal(storage.db.prepare("PRAGMA table_info(project_goals)").all().some(({ name }) => name === "achieved_at"), true);
+    assert.equal(storage.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'embedding_vectors'").get()?.["1"], 1);
     assert.equal(storage.getGoal("achieved").achievedAt, "2026-06-25T00:00:00.000Z");
     assert.equal(storage.updateGoal("achieved", { targetDate: "2026-07-01" }).achievedAt, "2026-06-25T00:00:00.000Z");
   } finally {

@@ -56,7 +56,7 @@ test("decision captured, exact-deduped, searchable, and in brief", async () => {
     assert.equal(r.recordType, "decision");
     assert.equal(hub.captureCandidate({ projectPath: dir, agent: "codex", message: msg }).action, "discarded");
     assert.equal(hub.search({ projectPath: dir, query: "WAL mode" }).results.length, 1);
-    assert.match(hub.buildBrief({ projectPath: dir }).text, /Recent Decisions[\s\S]*Adopt WAL mode/);
+    assert.match(hub.buildBrief({ projectPath: dir, context: { goalText: "adopt WAL mode for concurrent reads" } }).text, /Recent Decisions[\s\S]*Adopt WAL mode/);
   });
 });
 
@@ -68,12 +68,14 @@ test("same decision with materially changed rationale is NOT a duplicate", async
   });
 });
 
-test("inbox: requires fields, surfaces first in brief, resolves only within its project", async () => {
+test("inbox: requires fields, stays out of the brief, resolves only within its project", async () => {
   await withHub(async (hub, dir) => {
     assert.throws(() => hub.addInboxItem({ projectPath: dir, author: "human" }), /message is required/);
     assert.throws(() => hub.addInboxItem({ projectPath: dir, message: "x" }), /author is required/);
     const item = hub.addInboxItem({ projectPath: dir, author: "human", message: "Prioritize the auth bug" });
-    assert.match(hub.buildBrief({ projectPath: dir }).text, /Inbox \(from human\)[\s\S]*Prioritize the auth bug/);
+    // Inbox dropped from the brief (value audit V): 0 rows were ever written in production.
+    // The API and store still work; the brief just no longer carries the section.
+    assert.doesNotMatch(hub.buildBrief({ projectPath: dir, context: { goalText: "prioritize the auth bug" } }).text, /Inbox \(from human\)/);
     assert.throws(() => hub.resolveInbox({ projectPath: join(dir, "other"), id: item.id }), /not found/); // cross-project leak guarded
     hub.resolveInbox({ projectPath: dir, id: item.id });
     assert.equal(hub.listInbox({ projectPath: dir }).length, 0);
@@ -119,9 +121,9 @@ test("brief prioritizes a previously-attempted fix that touches the files in pla
     const relevantOld = hub.storage.insertFix({ id: crypto.randomUUID(), projectPath: dir, agent: "a", summary: "naive socket retry loop", filesChanged: ["socketHandler.js"] });
     hub.storage.insertFix({ id: crypto.randomUUID(), projectPath: dir, agent: "a", summary: "socket exponential backoff", filesChanged: ["socketHandler.js"], supersedesId: relevantOld.id });
 
+    // cold sessions now get a minimal brief with no Previously Attempted section (audit V)
     const noContext = hub.buildBrief({ projectPath: dir });
-    // without context, recency wins: the logging attempt (inserted later) leads
-    assert.match(noContext.text, /Previously Attempted[\s\S]*tweaked logging format/);
+    assert.doesNotMatch(noContext.text, /Previously Attempted/);
 
     const withContext = hub.buildBrief({ projectPath: dir, context: { recentFiles: ["src/socketHandler.js"] } });
     const heading = withContext.text.indexOf("Previously Attempted");
@@ -141,7 +143,7 @@ test("confidence decay ranks a verified fix ahead of an equally-old unverified o
     const same = new Date(Date.now() - 5 * 86400000).toISOString();
     hub.storage.db.prepare("UPDATE fix_entries SET created_at = ? WHERE id IN (?, ?)").run(same, unverified.id, verified.id);
 
-    const brief = hub.buildBrief({ projectPath: dir });
+    const brief = hub.buildBrief({ projectPath: dir, context: { goalText: "the attempted and confirmed timeout fix" } });
     const heading = brief.text.indexOf("Recent Fixes");
     const section = brief.text.slice(heading, heading + 300);
     assert.ok(
@@ -161,47 +163,32 @@ test("brief surfaces a same-named fix from another project as Related Elsewhere"
     hub.rebuildIndex();
 
     const noContext = hub.buildBrief({ projectPath: dir });
-    assert.match(noContext.text, /Related Elsewhere:\n- none/, "no context terms means no cross-project query is run");
+    // empty sections are elided entirely (no "- none" line), so the section's absence is
+    // the proof that no cross-project query ran
+    assert.doesNotMatch(noContext.text, /Related Elsewhere:/, "no context terms means no cross-project query is run");
 
     const withContext = hub.buildBrief({ projectPath: dir, context: { recentFiles: ["src/identity.js"] } });
     assert.match(withContext.text, /Related Elsewhere:[\s\S]*\[other\][\s\S]*Windows path casing/);
   });
 });
 
-test("three fixes accumulating on one file auto-promote a fragile-file lesson, once", async () => {
+test("repeated fixes on one file no longer manufacture a lesson", async () => {
   await withHub(async (hub, dir) => {
-    // three DISTINCT fixes (dissimilar summaries, so entity-anchored dedup keeps them separate)
-    // all touching src/rank.js — the file itself is the recurring pattern.
-    const first = hub.captureCandidate({
-      projectPath: dir, agent: "claude-code",
-      message: "Fixed ordering bug where pinned tasks dropped out. Files changed: src/rank.js. Verification: npm test passed.",
-    });
-    assert.equal(first.reason, "accepted_fix");
-    assert.equal(hub.storage.listLessons(dir).length, 0, "no lesson before the threshold");
-
-    const second = hub.captureCandidate({
-      projectPath: dir, agent: "claude-code",
-      message: "Added recency decay weighting so stale records stop crowding new ones. Files changed: src/rank.js. Verification: npm run test:rank green.",
-    });
-    assert.equal(second.reason, "accepted_fix");
-    assert.equal(hub.storage.listLessons(dir).length, 0, "still below the threshold");
-
-    const third = hub.captureCandidate({
-      projectPath: dir, agent: "claude-code",
-      message: "Corrected the priority tiebreaker integer overflow for large backlogs. Files changed: src/rank.js. Verification: unit suite passed.",
-    });
-    assert.equal(third.reason, "accepted_fix");
-    const lessons = hub.storage.listLessons(dir);
-    assert.equal(lessons.length, 1, "third fix on the same file crosses the threshold");
-    assert.match(lessons[0].statement, /Fragile file: rank\.js/);
-    assert.match(hub.buildBrief({ projectPath: dir }).text, /Lessons:[\s\S]*Fragile file: rank\.js/);
-    assert.equal(hub.storage.listMetrics(dir, { kind: "lesson_promoted" })[0].payload.agent, "claude-code");
-
-    const fourth = hub.captureCandidate({
-      projectPath: dir, agent: "claude-code",
-      message: "Removed a dead branch left by the tiebreaker work. Files changed: src/rank.js. Verification: npm test passed.",
-    });
-    assert.equal(fourth.reason, "accepted_fix");
-    assert.equal(hub.storage.listLessons(dir).length, 1, "does not promote a second lesson for the same file");
+    // The fragile-file generator counted fix RECORDS, which duplicate captures inflate 2-6x
+    // against git (SETUP.md: 92 records, 14 commits). It produced every lesson in the table
+    // and none was ever cited, so it is gone. Fixes still capture; they just stop inventing
+    // a "lesson" out of an edit count.
+    for (const message of [
+      "Fixed ordering bug where pinned tasks dropped out. Files changed: src/rank.js. Verification: npm test passed.",
+      "Added recency decay weighting so stale records stop crowding new ones. Files changed: src/rank.js. Verification: npm run test:rank green.",
+      "Corrected the priority tiebreaker integer overflow for large backlogs. Files changed: src/rank.js. Verification: unit suite passed.",
+    ]) {
+      assert.equal(hub.captureCandidate({ projectPath: dir, agent: "claude-code", message }).reason, "accepted_fix");
+    }
+    assert.equal(hub.storage.listLessons(dir).length, 0, "no lesson is manufactured from an edit count");
+    assert.doesNotMatch(hub.buildBrief({ projectPath: dir }).text, /Lessons:/);
+    // A lesson written deliberately through the API still stores and still serves.
+    hub.storage.insertLesson({ projectPath: dir, statement: "rank.js is single-writer; do not parallelize", status: "open" });
+    assert.equal(hub.storage.listLessons(dir).length, 1);
   });
 });

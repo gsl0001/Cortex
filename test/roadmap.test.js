@@ -445,3 +445,34 @@ test("Windows case aliases cannot activate a second goal for one project", { ski
   const alias = hub.storage.insertGoal({ id: "alias", projectPath: dir.toUpperCase(), title: "Alias", outcome: "No", successCriteria: [], targetDate: "2026-08-01", weeklyCapacity: 1, status: "paused" });
   assert.throws(() => hub.updateGoal({ id: alias.id, status: "active", activeRank: 2 }), /project already/i);
 }));
+
+test("abandoning a goal retires its open tasks to backlog and notes the inbox", async () => withHub(({ hub, dir }) => {
+  const roadmap = approve(hub, dir, {
+    milestones: [{ key: "m1", title: "Build", order: 1, dueDate: "2026-07-05" }],
+    tasks: [
+      { key: "t1", action: "create", type: "feature", milestoneKey: "m1", number: "1.1", order: 1, title: "Open work", verificationCommand: "npm test" },
+      { key: "t2", action: "create", type: "chore", milestoneKey: "m1", number: "1.2", order: 2, title: "Live work", verificationCommand: "npm test" },
+      { key: "t3", action: "create", type: "docs", milestoneKey: "m1", number: "1.3", order: 3, title: "Unrelated project task", verificationCommand: "npm test" },
+    ],
+  });
+  const [open, live, unrelated] = roadmap.tasks;
+  hub.editTask({ id: open.id, status: "ready" });
+  hub.editTask({ id: live.id, status: "in_progress" });
+  // same project, no milestone link — abandoning the goal must not touch it
+  const standalone = hub.addTask({ type: "chore", projectPath: dir, title: "Standalone" });
+  hub.editTask({ id: standalone.id, status: "ready" });
+  hub.editTask({ id: unrelated.id, status: "blocked", blockReason: "waiting" });
+
+  hub.updateGoal({ id: roadmap.goal.id, status: "abandoned" });
+
+  assert.equal(hub.storage.getTask(open.id).status, "backlog");      // ready -> retired
+  assert.equal(hub.storage.getTask(unrelated.id).status, "backlog"); // blocked -> retired
+  assert.equal(hub.storage.getTask(live.id).status, "in_progress");  // live run untouched
+  assert.equal(hub.storage.getTask(standalone.id).status, "ready");  // not the goal's task
+  assert.ok(hub.listInbox({ projectPath: dir }).some((i) => /abandoned: 2 open task/i.test(i.message)));
+
+  // repeating the abandon (or editing other fields while abandoned) demotes nothing further
+  hub.editTask({ id: open.id, status: "ready" });
+  hub.updateGoal({ id: roadmap.goal.id, weeklyCapacity: 2 });
+  assert.equal(hub.storage.getTask(open.id).status, "ready");
+}));

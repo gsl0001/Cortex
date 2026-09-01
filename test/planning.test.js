@@ -7,6 +7,7 @@ import {
   deadlineHealth,
   goalProgress,
   isProjectStalled,
+  portfolioStalls,
   selectNextAction,
 } from "../src/planning.js";
 
@@ -176,4 +177,30 @@ test("autoPlanWeek prefers earlier milestone deadlines before rank for equal pri
   ], { weekStart: "2026-06-29", totalCapacity: 1, projectCapacities: { a: 1, b: 1 } });
 
   assert.equal(planned[0].id, "due-first");
+});
+
+test("portfolioStalls finds projects being worked on with nothing to pick up next", () => {
+  const today = "2026-07-25";
+  const stalls = portfolioStalls([
+    // Shipped code two days ago and carries no task at all -- the live shape of Frontboard,
+    // the video factory and dev-dist, and invisible to isProjectStalled (which needs tasks).
+    { projectPath: "C:/work/noteapp", tier: "assist", lastRecordAt: "2026-07-23", tasks: [] },
+    // Active, but every open task is blocked: nothing can be picked up either.
+    { projectPath: "C:/work/sitelogs", tier: "assist", lastRecordAt: "2026-07-24",
+      tasks: [{ status: "blocked" }, { status: "done" }] },
+    // Active and has ready work -- not stalled.
+    { projectPath: "C:/work/sleep", tier: "auto", lastRecordAt: "2026-07-25",
+      tasks: [{ status: "ready" }] },
+    // Dormant: no records in the window, so silence is expected, not a signal.
+    { projectPath: "C:/work/marketplace", tier: "watch", lastRecordAt: "2026-07-09", tasks: [] },
+    // Never produced anything at all.
+    { projectPath: "C:/work/ghost", tier: "watch", lastRecordAt: null, tasks: [] },
+  ], { today });
+
+  assert.deepEqual(stalls.map((s) => [s.projectPath, s.reason]), [
+    ["C:/work/sitelogs", "all-blocked"],
+    ["C:/work/noteapp", "no-open-tasks"],
+  ]);
+  assert.equal(stalls[0].tier, "assist");
+  assert.throws(() => portfolioStalls([], {}), /today is required/);
 });

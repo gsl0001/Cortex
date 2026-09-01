@@ -11,8 +11,8 @@ test("loadTelegramChannel reads the claude channel config; missing/partial confi
     assert.equal(loadTelegramChannel(dir), null); // nothing there yet
     await writeFile(join(dir, ".env"), "TELEGRAM_BOT_TOKEN=123:abc\n");
     assert.equal(loadTelegramChannel(dir), null); // token alone is not enough
-    await writeFile(join(dir, "access.json"), JSON.stringify({ dmPolicy: "allowlist", allowFrom: ["111222333"] }));
-    assert.deepEqual(loadTelegramChannel(dir), { token: "123:abc", chatId: "111222333" });
+    await writeFile(join(dir, "access.json"), JSON.stringify({ dmPolicy: "allowlist", allowFrom: ["5657353623"] }));
+    assert.deepEqual(loadTelegramChannel(dir), { token: "123:abc", chatId: "5657353623" });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -44,4 +44,30 @@ test("no channel and no sender means every push is a silent no-op", async () => 
   const notifier = createNotifier({ channel: null });
   assert.equal(notifier.enabled, false);
   assert.equal(await notifier.push("k", "msg"), false);
+});
+
+test("pushDocument posts the file via sendDocument and never throws", async () => {
+  const calls = [];
+  const notifier = createNotifier({
+    channel: { token: "tok", chatId: "42" },
+    sendImpl: async () => {},
+    sendDocumentImpl: async (path, caption) => { calls.push({ path, caption }); },
+  });
+  const ok = await notifier.pushDocument("reports/eod/2026-08-07.html", "Evening brief");
+  assert.equal(ok, true);
+  assert.deepEqual(calls, [{ path: "reports/eod/2026-08-07.html", caption: "Evening brief" }]);
+});
+
+test("pushDocument is a no-op without a channel", async () => {
+  const notifier = createNotifier({ channel: null });
+  assert.equal(await notifier.pushDocument("x.html", "cap"), false);
+});
+
+test("pushDocument reports false rather than throwing when sendDocumentImpl throws", async () => {
+  const notifier = createNotifier({
+    channel: { token: "tok", chatId: "42" },
+    sendImpl: async () => {},
+    sendDocumentImpl: async () => { throw new Error("telegram down"); },
+  });
+  assert.equal(await notifier.pushDocument("x.html", "cap"), false);
 });

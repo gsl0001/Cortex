@@ -2,15 +2,17 @@ import { randomUUID } from "node:crypto";
 import { readdirSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { buildProjectBrief } from "./brief.js";
-import { captureCandidate } from "./captureService.js";
+import { captureCandidate, findDecisionDuplicate } from "./captureService.js";
+import { isAnswerProse } from "./capturePolicy.js";
 import { auditDatabase, auditProject, remediateAudit, computeFragilePaths } from "./audit.js";
-import { extractContextTerms } from "./contextRanking.js";
+import { briefQuery, extractContextTerms } from "./contextRanking.js";
 import { drainIndexJobs, enqueueRecord, rebuildSearchIndex } from "./indexer.js";
 import { searchMemory } from "./search.js";
-import { LocalMinHashEmbeddingProvider } from "./embeddingProvider.js";
+import { OllamaEmbeddingProvider } from "./embeddingProvider.js";
 import { packContext } from "./tokenPacker.js";
 import { CortexStorage, normalizeProjectPath } from "./storage.js";
 import { computeStats } from "./stats.js";
+import { buildProjectIndex, isOffTopic } from "./topicScope.js";
 import {
   autoPlanWeek,
   criterionVerified,
@@ -19,6 +21,10 @@ import {
   isProjectStalled,
   selectNextAction,
 } from "./planning.js";
+import {
+  buildPortfolioDoctor,
+  setProjectLifecycle as storeProjectLifecycle,
+} from "./portfolio.js";
 
 const TASK_STATUSES = new Set(["backlog", "ready", "in_progress", "blocked", "review", "done"]);
 
@@ -26,6 +32,17 @@ const TASK_STATUSES = new Set(["backlog", "ready", "in_progress", "blocked", "re
 // roadmap proposals) and referenced by the two task-writing skills. `chore` doubles as the
 // neutral/misc bucket (also the migration backfill for pre-type rows).
 export const TASK_TYPES = ["feature", "bug", "chore", "docs", "test", "research", "infra"];
+
+// Completion authority. Only human sign-off (agent 'human') may push a task to `done`; an
+// autonomous agent that identifies itself may only reach `review`. An absent agent stays
+// privileged (CLI, tests, roadmap machinery) — same convention as _assertLeaseOwnership.
+function assertCompletionAllowed(input) {
+  if (input.agent && input.agent !== "human") {
+    throw new Error(
+      `Agent '${input.agent}' may not set a task to 'done'; agents park in review for human sign-off.`,
+    );
+  }
+}
 
 function requireOneOf(value, allowed, field) {
   if (!allowed.includes(value)) throw new Error(`${field} must be one of: ${allowed.join(", ")}`);
@@ -64,7 +81,13 @@ function requirePositiveInteger(value, field) {
   return value;
 }
 
-function requireIsoDate(value, field) {
+const RECHECK_DEFAULT_DAYS = Number(process.env.CORTEX_RECHECK_DEFAULT_DAYS || 7);
+function defaultRecheckDate(now = new Date()) {
+  const due = new Date(now.getTime() + RECHECK_DEFAULT_DAYS * 86400000);
+  return `${due.getFullYear()}-${String(due.getMonth() + 1).padStart(2, "0")}-${String(due.getDate()).padStart(2, "0")}`;
+}
+
+export function requireIsoDate(value, field) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) throw new Error(`${field} must be a valid YYYY-MM-DD date`);
   const [year, month, day] = value.split("-").map(Number);
   const date = new Date(Date.UTC(year, month - 1, day));
@@ -223,9 +246,10 @@ export function validateRoadmapPayload(storage, projectPath, payload) {
 export class Cortex {
   constructor({ dbPath } = {}) {
     this.storage = new CortexStorage({ dbPath });
-    // one instance per hub, not one per search() call: its `cache` map (embeddingProvider.js)
-    // only amortizes repeated signature() calls if it's actually reused across searches.
-    this.embeddingProvider = new LocalMinHashEmbeddingProvider();
+    // one instance per hub, not one per search() call: its doc-vector and MinHash caches
+    // only amortize if actually reused across searches. Cosine scoring activates only where
+    // a caller awaits embeddingProvider.prepare(query); everything else gets MinHash.
+    this.embeddingProvider = new OllamaEmbeddingProvider({ storage: this.storage });
   }
 
   close() {
@@ -242,6 +266,18 @@ export class Cortex {
       risks: input.risks || [],
       externalMemoryDirs: input.externalMemoryDirs || [],
     });
+  }
+
+  portfolioDoctor(input = {}) {
+    return buildPortfolioDoctor(this.storage, { today: input.today });
+  }
+
+  setProjectLifecycle(input) {
+    return storeProjectLifecycle(
+      this.storage,
+      requireText(input.projectPath, "projectPath"),
+      requireText(input.state, "state"),
+    );
   }
 
   // Producers must exist at write time — a typo'd id reads as "stuck" forever and the
@@ -315,12 +351,19 @@ export class Cortex {
     if (task?.leaseAgent && task.leaseAgent !== agent) throw new Error("Task is leased by another agent");
   }
 
+  // Blocked work needs a way back. 6 of 11 blocked tasks in the live DB carried no recheck
+  // date — "Blocked until the build is submitted to App Review" had no mechanism to ever ask
+  // again, so it wasn't blocked, it was forgotten. A task waiting on the world gets a date.
   blockTask(input) {
     const id = requireText(input.id, "id");
     this._assertLeaseOwnership(id, input.agent);
-    const patch = { status: "blocked", blockReason: requireText(input.reason, "reason") };
+    const reason = requireText(input.reason, "reason");
+    const patch = { status: "blocked", blockReason: reason };
     if (input.recheckAt !== undefined && input.recheckAt !== null) {
       patch.recheckAt = requireIsoDate(input.recheckAt, "recheckAt");
+    } else if (!this.storage.getTask(id)?.recheckAt) {
+      // Never overwrite a date a human already chose; only fill the gap that leaves work stranded.
+      patch.recheckAt = defaultRecheckDate();
     }
     const task = this.storage.updateTask(id, patch);
     this.storage.clearLease(id); // terminal -> lease moot
@@ -346,6 +389,7 @@ export class Cortex {
     if (patch.title !== undefined) patch.title = requireText(patch.title, "title");
     if (patch.type !== undefined) patch.type = requireOneOf(patch.type, TASK_TYPES, "type");
     if (patch.status !== undefined) patch.status = taskStatus(patch.status);
+    if (patch.status === "done") assertCompletionAllowed(input); // editing to done is a completion too
     if (patch.recheckAt != null) requireIsoDate(patch.recheckAt, "recheckAt");
     if (patch.dependsOn !== undefined) {
       patch.dependsOn = Array.isArray(patch.dependsOn) ? patch.dependsOn.map((x) => requireText(x, "dependsOn[]")) : [];
@@ -362,7 +406,9 @@ export class Cortex {
 
   completeTask(input) {
     const id = requireText(input.id, "id");
+    if (!this.storage.getTask(id)) throw new Error(`Task not found: ${id}`); // not-found beats the authority error
     this._assertLeaseOwnership(id, input.agent);
+    assertCompletionAllowed(input);
     const task = this.storage.updateTask(id, {
       status: "done",
       evidence: requireText(input.evidence, "evidence"),
@@ -376,23 +422,7 @@ export class Cortex {
     return this.storage.releaseLease(input.id, requireText(input.agent, "agent"));
   }
 
-  // ---- self-improvement loop ----
-  startRun(input) {
-    return this.storage.startRun({ ...input, agent: requireText(input.agent, "agent") });
-  }
-
-  finishRun(input) {
-    return this.storage.finishRun(input.id, input);
-  }
-
-  updateRunProgress(input) {
-    return this.storage.updateRunProgress(input.id, input);
-  }
-
-  interruptOpenRuns() {
-    return this.storage.interruptOpenRuns();
-  }
-
+  // ---- agent-run history (the launch machinery is gone; runs are read-only history) ----
   listRuns(input = {}) {
     return this.storage.listRuns(normalizeProjectPath(input.projectPath || process.cwd()), { limit: input.limit || 100 });
   }
@@ -518,6 +548,9 @@ export class Cortex {
 
   getGoalsPortfolio(input = {}) {
     const today = requireIsoDate(input.today, "today");
+    // instrument-or-delete counter (2026-07 audit): does anything actually read the
+    // goals/roadmap layer? Recorded machine-wide — the portfolio spans projects.
+    try { this.storage.recordMetric("goals_viewed", "machine", {}); } catch { /* best-effort */ }
     const projects = this.storage.listGoals({ status: "active" }).map((goal) => {
       const roadmap = this.storage.getRoadmap(goal.projectPath, goal.id);
       const milestonesWithTasks = roadmap.milestones.map((milestone) => ({
@@ -652,12 +685,26 @@ export class Cortex {
       if (active.length >= 5) throw new Error("Cannot exceed five active projects");
       if (active.some((other) => other.activeRank === activeRank)) throw new Error("active rank is already occupied");
     }
-    return this.storage.updateGoal(goal.id, {
+    const updated = this.storage.updateGoal(goal.id, {
       status,
       activeRank,
       ...(input.targetDate != null ? { targetDate: input.targetDate } : {}),
       ...(input.weeklyCapacity != null ? { weeklyCapacity: input.weeklyCapacity } : {}),
     });
+    // Abandoning a goal retires its open tasks: leaving them `ready` keeps them in the
+    // dispatch pool for work nobody wants (18 tasks from one abandoned goal sat there
+    // for five days). Backlog, not delete — reactivating the goal can resurface them.
+    if (status === "abandoned" && goal.status !== "abandoned") {
+      const demoted = this.storage.demoteGoalTasksToBacklog(goal.id);
+      if (demoted > 0) {
+        // PR #35 retirement was visible only as an inbox note (audit III); count it too.
+        try { this.storage.recordMetric("goal_retired", goal.projectPath, { goalId: goal.id, taskCount: demoted }); }
+        catch { /* best-effort */ }
+        this.addInboxItem({ projectPath: goal.projectPath, author: "system",
+          message: `Goal "${goal.title}" abandoned: ${demoted} open task(s) moved to backlog.` });
+      }
+    }
+    return updated;
   }
 
   updateMilestone(input) {
@@ -821,6 +868,17 @@ export class Cortex {
     drainIndexJobs(this.storage);
     const search = searchMemory(this.storage, { embeddingProvider: this.embeddingProvider, ...input });
     const context = packContext(search.results, { maxTokens: input.maxTokens || 1500 });
+    // 2026-07 audit: 1,775 indexed chunks with zero usage telemetry — instrument-or-delete
+    // needs this counter before the two-week clock can judge the search subsystem. Internal
+    // callers (buildBrief's cross-project lookup) are excluded: the counter measures demand,
+    // not the hub calling itself.
+    if (!input.internal) {
+      try {
+        this.storage.recordMetric("search_used", normalizeProjectPath(input.projectPath || process.cwd()), {
+          agent: input.agent || null, query: String(input.query || "").slice(0, 120), results: search.results?.length ?? 0,
+        });
+      } catch { /* observability is best-effort */ }
+    }
     return {
       ...search,
       context,
@@ -829,10 +887,45 @@ export class Cortex {
   }
 
   stats(input = {}) {
-    return computeStats(this.storage, {
-      projectPath: normalizeProjectPath(input.projectPath || process.cwd()),
-      since: input.since,
-    });
+    return {
+      ...computeStats(this.storage, {
+        projectPath: normalizeProjectPath(input.projectPath || process.cwd()),
+        since: input.since,
+      }),
+      // throughput is a number, not a vibe: weekly merged/verified/reviewed run rollup
+      runsWeekly: this.storage.weeklyRunRollup(),
+    };
+  }
+
+  // One-time backfill for decisions captured before the revision gate existed (2026-08-03:
+  // 133 of 630 live decisions were restatements). Chains each duplicate cluster oldest←newest
+  // so only the newest wording stays live; superseded rows remain in history and search.
+  // Dry-run by default. ponytail: O(n²) minhash per project, fine at maintenance cadence.
+  dedupeDecisions({ projectPath = null, apply = false } = {}) {
+    const projects = projectPath
+      ? [normalizeProjectPath(projectPath)]
+      : this.storage.listDecisionProjectPaths();
+    const report = { projects: projects.length, clusters: 0, redundant: 0, linked: 0, applied: Boolean(apply) };
+    for (const project of projects) {
+      // oldest first, so each cluster's last member is its newest wording
+      const live = this.storage.listDecisions(project, { limit: 10000, excludeSuperseded: true }).reverse();
+      const clusters = [];
+      for (const record of live) {
+        const home = clusters.find((members) => members.some((m) => findDecisionDuplicate(record, [m])));
+        if (home) home.push(record);
+        else clusters.push([record]);
+      }
+      for (const cluster of clusters) {
+        if (cluster.length < 2) continue;
+        report.clusters += 1;
+        report.redundant += cluster.length - 1;
+        if (!apply) continue;
+        for (let i = cluster.length - 1; i > 0; i -= 1) {
+          report.linked += this.storage.supersedeDecision(cluster[i].id, cluster[i - 1].id);
+        }
+      }
+    }
+    return report;
   }
 
   sweep(now = new Date(), { logRoot } = {}) {
@@ -875,6 +968,31 @@ export class Cortex {
     return rebuildSearchIndex(this.storage);
   }
 
+  // Pull one record in full by its citable [m:xxxxxx] prefix — the read half of the
+  // stub-index brief (stubs inject one line; bodies are pulled on demand). The pull is a
+  // direct usage signal, recorded like a citation channel.
+  getRecord({ idPrefix, agent } = {}) {
+    const prefix = String(idPrefix || "").toLowerCase().replace(/^\[?m:/, "").replace(/\]$/, "");
+    const ref = this.storage.findRecordByPrefix(prefix);
+    if (!ref) return null;
+    const record = ref.recordType === "fix" ? this.storage.getFix(ref.id)
+      : ref.recordType === "research" ? this.storage.getResearch(ref.id)
+      : this.storage.getDecision(ref.id);
+    try {
+      this.storage.recordMetric("recall_pulled", ref.projectPath, { agent: agent || null, idPrefix: prefix, recordType: ref.recordType });
+    } catch { /* telemetry only */ }
+    return { ...record, recordType: ref.recordType };
+  }
+
+  // Await before buildBrief to enable cosine scoring for the brief's semantic arm — embeds
+  // the session query once (2s cap, silent MinHash fallback if Ollama is down). Callers that
+  // skip it (tests, cold paths) just get the MinHash-scale semantic scores.
+  async prepareBrief(context = {}) {
+    if (process.env.CORTEX_BRIEF_SEMANTIC === "0") return;
+    const query = briefQuery(context);
+    if (query) await this.embeddingProvider.prepare?.(query);
+  }
+
   buildBrief(input = {}) {
     const projectPath = normalizeProjectPath(input.projectPath || process.cwd());
     const profile = this.storage.getProjectProfile(projectPath);
@@ -890,15 +1008,54 @@ export class Cortex {
         if (prefix) citedCounts.set(prefix, (citedCounts.get(prefix) || 0) + 1);
       }
     } catch { /* citation telemetry is best-effort */ }
+    // Injection counts back the fatigue penalty in contextRanking.confidence(): a record served
+    // repeatedly with no citation yields its slot. Reads the same recall_injected payloads the
+    // metric already writes, so no new bookkeeping — see topicScope.js for the sibling problem.
+    // Counted as distinct SESSIONS served, not raw injections: per-injection counts fed back
+    // into ranking every prompt, reordering the brief and changing its hash — fatigue and
+    // delta suppression were wired in opposition. Per-session counts are stable within a
+    // session (this session adds at most 1) and measure the honest thing: sessions that saw
+    // the record and never cited it.
+    const injectedSessions = new Map();
+    try {
+      for (const m of this.storage.listMetrics(projectPath, { kind: "recall_injected", limit: 400 })) {
+        const sessionKey = m.payload?.sessionId || m.id;
+        for (const key of ["injectedFixIds", "injectedResearchIds", "injectedDecisionIds"]) {
+          for (const id of m.payload?.[key] || []) {
+            if (!injectedSessions.has(id)) injectedSessions.set(id, new Set());
+            injectedSessions.get(id).add(sessionKey);
+          }
+        }
+      }
+    } catch { /* injection telemetry is best-effort */ }
     const withUse = (record) => ({
       ...record,
       useCount: citedCounts.get(String(record.id || "").replace(/-/g, "").slice(0, 6)) || 0,
+      injectedCount: injectedSessions.get(record.id)?.size || 0,
     });
+    // Topic scope (value audit IV): decline to serve records whose content plainly belongs to a
+    // different registered project. Labels alone cannot catch these — the record is filed under
+    // the directory the session ran in, which is why the label-based scope check reads clean.
+    const topicIndex = process.env.CORTEX_TOPIC_SCOPE === "0"
+      ? new Map()
+      : buildProjectIndex(this.storage.listProjectProfiles());
+    let offTopicFiltered = 0;
+    const onTopic = (textOf) => (record) => {
+      if (!isOffTopic(textOf(record), projectPath, topicIndex)) return true;
+      offTopicFiltered += 1;
+      return false;
+    };
     // Quarantined records (Stale: corrections, poisoning flags) never re-enter briefs;
     // they stay in the store for search and dashboard review.
     const notQuarantined = (record) => record.qualityStatus !== "quarantined";
+    // withUse runs BEFORE the topic filter so a cited record is exempt from topic scoping:
+    // the filter's false negatives concentrate in cross-project rules ("never enroll master
+    // in Autopilot"), and a citation is direct evidence the record belongs in this brief.
+    const citedOrOnTopic = (textOf) => { const gate = onTopic(textOf); return (r) => r.useCount > 0 || gate(r); };
     const research = this.storage.listResearch(projectPath, { limit: 20, excludeSuperseded: true, maxAgeDays })
-      .filter(notQuarantined).map(withUse);
+      .filter(notQuarantined)
+      .map(withUse)
+      .filter(citedOrOnTopic((r) => `${r.question} ${r.finding}`));
     // Quality-tiered TTL: unverified, never-cited fixes leave brief eligibility after 45 days
     // (they stay in the store and FTS-searchable) — stale unverified prose was the main
     // occupant of the brief's five fix slots.
@@ -907,23 +1064,28 @@ export class Cortex {
     const fixes = this.storage.listFixes(projectPath, { limit: 20, excludeSuperseded: true, maxAgeDays })
       .filter(notQuarantined)
       .map(withUse)
+      .filter(citedOrOnTopic((f) => `${f.summary} ${(f.filesChanged || []).join(" ")}`))
+      // Same test the capture gate applies, on the read side: answers stored as fixes before
+      // that gate existed are still fixes in the table, and they were holding brief slots.
+      .filter((fix) => { if (!isAnswerProse(fix)) return true; offTopicFiltered += 1; return false; })
       .filter((fix) => Boolean(fix.verification) || fix.qualityStatus === "verified"
         || fix.useCount > 0 || new Date(fix.createdAt).getTime() >= ttlCutoff);
     const sessions = this.storage.listActiveSessions(projectPath);
-    const decisions = this.storage.listDecisions(projectPath, { limit: 5, excludeSuperseded: true, maxAgeDays })
-      .filter(notQuarantined).map(withUse);
-    const inboxItems = this.storage.listInboxItems(projectPath, { limit: 5 });
+    // limit 20, not 5: decisions are ranked now (rankDecisions), and a ranker fed exactly as many
+    // candidates as it has slots is just the recency list wearing a ranker's name.
+    const decisions = this.storage.listDecisions(projectPath, { limit: 20, excludeSuperseded: true, maxAgeDays })
+      .filter(notQuarantined)
+      .map(withUse)
+      .filter(citedOrOnTopic((d) => `${d.decision} ${d.rationale} ${d.alternatives || ""}`));
+    // Inbox and lessons no longer feed the brief (value audit V): inbox had 0 rows ever;
+    // lessons earned 0 citations ever and still reach agents via JIT recall on file touch.
     const previouslyAttempted = this.storage.listSupersededFixes(projectPath, { limit: 20 });
-    const lessons = this.storage.listLessons(projectPath, { limit: 5 });
-    // Environmental truths (auth expiry, sqlite quirks) are machine-wide — surface the
-    // reserved "machine" scope in every registered project's brief.
-    const machineLessons = this.storage.listLessons("machine", { limit: 3 });
     const fragilePaths = this.fragilePaths({ projectPath });
     // reuses search's existing same-project-affinity ranking; just keeps the OTHER-project
     // hits the brief currently throws away — e.g. a Windows path-casing fix from a sibling repo.
     const contextTerms = extractContextTerms(input.context || {});
     const crossProjectMatches = contextTerms.length
-      ? this.search({ projectPath, query: contextTerms.slice(0, 8).join(" "), maxTokens: 300 }).results
+      ? this.search({ projectPath, query: contextTerms.slice(0, 8).join(" "), maxTokens: 300, internal: true }).results
           .filter((r) => r.projectPath !== projectPath)
           .slice(0, 3)
       : [];
@@ -939,14 +1101,27 @@ export class Cortex {
     // graduate to a fix) instead of dying silently at its 7-day TTL.
     const lastSession = sessionEvents.find((e) => !String(e.source || "").startsWith("handoff:"));
 
-    return buildProjectBrief({
-      projectPath, profile, tasks, research, fixes, sessions,
-      decisions, inboxItems, previouslyAttempted, lessons, machineLessons, fragilePaths, crossProjectMatches, handoff: handoff?.summary,
+    // Semantic scorer for ranking/admission: cosine against precomputed doc vectors when
+    // prepareBrief ran (same briefQuery string, so the provider's query cache hits), MinHash
+    // otherwise. Disabled with the same env switch as prepareBrief.
+    const query = briefQuery(input.context || {});
+    const semantic = query && process.env.CORTEX_BRIEF_SEMANTIC !== "0"
+      ? (record, text) => this.embeddingProvider.similarity(query, text, record.id)
+      : null;
+    const built = buildProjectBrief({
+      projectPath, profile, tasks, research, fixes, sessions, semantic,
+      decisions, previouslyAttempted, fragilePaths, crossProjectMatches, handoff: handoff?.summary,
       lastSession: handoff ? null : lastSession?.summary,
       context: input.context || {},
-      maxTokens: input.maxTokens ?? Number(process.env.CORTEX_BRIEF_TOKENS || 1200),
+      // setting > env so the cap-size test (value audit II Phase 2) is a live settings flip
+      // Default 600 (was 1200; injection research Aug 28): the context-file ablation found no
+      // correctness gain from bigger briefs, Chroma's context-rot data shows each uncited
+      // record is an active distractor, and at the old cap ~81% of injected tokens were never
+      // cited. Override via the brief.maxTokens setting or CORTEX_BRIEF_TOKENS.
+      maxTokens: input.maxTokens ?? this.storage.getSetting("brief.maxTokens", Number(process.env.CORTEX_BRIEF_TOKENS || 600)),
       fieldChars: Number(process.env.CORTEX_BRIEF_FIELD_CHARS || 160),
     });
+    return { ...built, offTopicFiltered };
   }
 }
 

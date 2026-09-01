@@ -10,7 +10,7 @@ export function loadTelegramChannel(dir = join(homedir(), ".claude", "channels",
   try {
     const env = readFileSync(join(dir, ".env"), "utf8");
     const token = env.match(/^TELEGRAM_BOT_TOKEN=(.+)$/m)?.[1]?.trim();
-    const access = JSON.parse(readFileSync(join(dir, "access.json"), "utf8"));
+    const access = JSON.parse(readFileSync(join(dir, "access.json"), "utf8").replace(/^﻿/, ""));
     const chatId = (access.allowFrom || [])[0];
     return token && chatId ? { token, chatId: String(chatId) } : null;
   } catch {
@@ -25,6 +25,7 @@ export function loadTelegramChannel(dir = join(homedir(), ".claude", "channels",
 export function createNotifier({
   channel = loadTelegramChannel(),
   sendImpl,
+  sendDocumentImpl,
   minIntervalMs = Number(process.env.CORTEX_PUSH_MIN_INTERVAL_MS || 60_000),
   now = Date.now,
 } = {}) {
@@ -35,6 +36,15 @@ export function createNotifier({
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ chat_id: channel.chatId, text }),
     });
+  });
+  const sendDocument = sendDocumentImpl || (async (filePath, caption) => {
+    const { readFileSync } = await import("node:fs");
+    const { basename } = await import("node:path");
+    const form = new FormData();
+    form.append("chat_id", channel.chatId);
+    form.append("caption", caption);
+    form.append("document", new Blob([readFileSync(filePath)], { type: "text/html" }), basename(filePath));
+    await fetch(`https://api.telegram.org/bot${channel.token}/sendDocument`, { method: "POST", body: form });
   });
   const enabled = Boolean(channel || sendImpl);
   return {
@@ -47,6 +57,17 @@ export function createNotifier({
       lastSentByKey.set(key, t);
       try {
         await send(text);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    // Not debounced: an explicit attachment push (e.g. the EOD HTML report) should
+    // always go out when called, same never-throws contract as push().
+    async pushDocument(filePath, caption) {
+      if (!enabled) return false;
+      try {
+        await sendDocument(filePath, caption);
         return true;
       } catch {
         return false;

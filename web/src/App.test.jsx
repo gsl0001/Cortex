@@ -35,8 +35,9 @@ test("uses icon sidebar on mobile with More menu for secondary views", async () 
   expect(within(navigation.getByRole("button", { name: "Control Center" })).getByText("Control")).toBeInTheDocument();
   fireEvent.click(navigation.getByRole("button", { name: "More" }));
   const menu = screen.getByRole("menu", { name: "More destinations" });
-  expect(within(menu).getByRole("menuitem", { name: "Runs" })).toBeInTheDocument();
+  expect(within(menu).getByRole("menuitem", { name: "Portfolio" })).toBeInTheDocument();
   expect(within(menu).getByRole("menuitem", { name: "Health & audit" })).toBeInTheDocument();
+  expect(within(menu).queryByRole("menuitem", { name: "Runs" })).toBeNull(); // superseded by Control Center
 });
 
 test("activity log renders cross-DB rows and filters by type", async () => {
@@ -69,7 +70,7 @@ test("tasks view: This week is the default, and All tasks groups by project", as
   const tasks = [
     {
       id: "task-1",
-      projectPath: "/home/user/projects/app",
+      projectPath: "C:/work/master",
       title: "Add push-based fill handler with a very long implementation title",
       status: "ready",
       priority: "high",
@@ -79,7 +80,7 @@ test("tasks view: This week is the default, and All tasks groups by project", as
     },
     {
       id: "task-2",
-      projectPath: "C:/spy/cortex",
+      projectPath: "C:/work/cortex",
       title: "Add next-task command for agent workflow",
       status: "in_progress",
       priority: "high",
@@ -91,8 +92,8 @@ test("tasks view: This week is the default, and All tasks groups by project", as
   vi.stubGlobal("fetch", vi.fn().mockImplementation((path) => {
     if (String(path).includes("/projects")) {
       return Promise.resolve({ ok: true, json: async () => [
-        { projectPath: "/home/user/projects/app", name: "Example App" },
-        { projectPath: "C:/spy/cortex", name: "Cortex" },
+        { projectPath: "C:/work/master", name: "Trading System" },
+        { projectPath: "C:/work/cortex", name: "Cortex" },
       ] });
     }
     if (String(path).includes("/tasks")) return Promise.resolve({ ok: true, json: async () => tasks });
@@ -110,7 +111,7 @@ test("tasks view: This week is the default, and All tasks groups by project", as
   expect(userReqPane.getAllByLabelText("User request").length).toBe(2);
 
   fireEvent.click(screen.getByRole("button", { name: "All tasks" }));
-  expect(screen.getAllByText("Example App").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("Trading System").length).toBeGreaterThan(0);
   expect(screen.getAllByText("Cortex").length).toBeGreaterThan(0);
   // agent is an inline select; task-2's assigned agent is preselected
   expect(screen.getByLabelText("Assign agent for Add next-task command for agent workflow")).toHaveValue("claude-code");
@@ -123,13 +124,13 @@ test("tasks view: This week is the default, and All tasks groups by project", as
 test("this-week workbench splits scheduled roadmap tasks from unscheduled user requests", async () => {
   const weekStart = mondayOf(today());
   const tasks = [
-    { id: "t1", projectPath: "/home/user/projects/app", title: "Scheduled roadmap task", status: "ready", priority: "high", milestoneId: "m1", scheduledFor: weekStart },
-    { id: "t2", projectPath: "/home/user/projects/app", title: "Ad-hoc user request", status: "ready", priority: "normal" },
-    { id: "t3", projectPath: "/home/user/projects/app", title: "Future roadmap task", status: "ready", priority: "high", milestoneId: "m1", scheduledFor: addDays(weekStart, 30) },
-    { id: "t4", projectPath: "/home/user/projects/app", title: "Scheduled ad-hoc request", status: "ready", priority: "normal", scheduledFor: weekStart },
+    { id: "t1", projectPath: "C:/work/master", title: "Scheduled roadmap task", status: "ready", priority: "high", milestoneId: "m1", scheduledFor: weekStart },
+    { id: "t2", projectPath: "C:/work/master", title: "Ad-hoc user request", status: "ready", priority: "normal" },
+    { id: "t3", projectPath: "C:/work/master", title: "Future roadmap task", status: "ready", priority: "high", milestoneId: "m1", scheduledFor: addDays(weekStart, 30) },
+    { id: "t4", projectPath: "C:/work/master", title: "Scheduled ad-hoc request", status: "ready", priority: "normal", scheduledFor: weekStart },
   ];
   vi.stubGlobal("fetch", vi.fn().mockImplementation((path) => {
-    if (String(path).includes("/projects")) return Promise.resolve({ ok: true, json: async () => [{ projectPath: "/home/user/projects/app", name: "Example App" }] });
+    if (String(path).includes("/projects")) return Promise.resolve({ ok: true, json: async () => [{ projectPath: "C:/work/master", name: "Trading System" }] });
     if (String(path).includes("/tasks")) return Promise.resolve({ ok: true, json: async () => tasks });
     return Promise.resolve({ ok: true, json: async () => [] });
   }));
@@ -339,7 +340,7 @@ test("edit sends PATCH action edit; remove confirms then surfaces API errors", a
     expect.objectContaining({ method: "PATCH" }),
   ));
   const patchCall = fetchMock.mock.calls.find(([u, o]) => String(u).endsWith("/tasks/task-1") && o?.method === "PATCH");
-  expect(JSON.parse(patchCall[1].body).action).toBe("edit");
+  expect(JSON.parse(patchCall[1].body)).toMatchObject({ action: "edit", title: "New" });
 
   fireEvent.click(await screen.findByRole("button", { name: "More actions for New" }));
   fireEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
@@ -372,15 +373,15 @@ const openControlCenter = () =>
   fireEvent.click(within(screen.getByRole("navigation", { name: "Primary" })).getByRole("button", { name: "Control Center" }));
 
 test("control center lists decisions and approves a review with a complete PATCH", async () => {
-  const review = { id: "t1", title: "Paywall T3", status: "review", evidence: "33 tests green", projectPath: "C:/spy/sitelogs", assignedAgent: "codex" };
+  const review = { id: "t1", title: "Paywall T3", status: "review", evidence: "33 tests green", projectPath: "C:/work/sitelogs", assignedAgent: "codex" };
   const needs = {
     reviews: [review],
-    inbox: [{ id: "i1", projectPath: "C:/spy/sitelogs", author: "codex", message: "PR open, awaiting merge" }],
+    inbox: [{ id: "i1", projectPath: "C:/work/sitelogs", author: "codex", message: "PR open, awaiting merge" }],
     dispatcher: { enabled: false, projects: [], activeRuns: 0, lastTickAt: null },
   };
   const fetchMock = ccFetch({
     needs,
-    projects: [{ projectPath: "C:/spy/sitelogs", name: "Sitelogs" }],
+    projects: [{ projectPath: "C:/work/sitelogs", name: "Sitelogs" }],
     extra: (s, options) => {
       if (s.includes("/tasks/t1") && options?.method === "PATCH") {
         needs.reviews = [];
@@ -403,11 +404,11 @@ test("control center lists decisions and approves a review with a complete PATCH
 });
 
 test("control center reject flow blocks the task with the typed reason and date", async () => {
-  const review = { id: "t1", title: "Paywall T3", status: "review", evidence: "33 tests green", projectPath: "C:/spy/sitelogs", assignedAgent: "codex" };
+  const review = { id: "t1", title: "Paywall T3", status: "review", evidence: "33 tests green", projectPath: "C:/work/sitelogs", assignedAgent: "codex" };
   const needs = { reviews: [review], inbox: [], dispatcher: { enabled: false, projects: [], activeRuns: 0, lastTickAt: null } };
   const fetchMock = ccFetch({
     needs,
-    projects: [{ projectPath: "C:/spy/sitelogs", name: "Sitelogs" }],
+    projects: [{ projectPath: "C:/work/sitelogs", name: "Sitelogs" }],
     extra: (s, options) => {
       if (s.includes("/tasks/t1") && options?.method === "PATCH") {
         needs.reviews = [];
@@ -499,11 +500,11 @@ test("control center resolves an inbox note", async () => {
 });
 
 test("control center renders markdown evidence as formatted elements, not literal syntax", async () => {
-  const review = { id: "t1", title: "Price-drop", status: "review", assignedAgent: "claude-code", projectPath: "C:/spy/marketplace",
+  const review = { id: "t1", title: "Price-drop", status: "review", assignedAgent: "claude-code", projectPath: "C:/work/marketplace",
     evidence: "**What shipped**\n- `src/price-drop.ts` — recordAndDetectDrops()\n- `src/alerts.ts` — processAlerts()" };
   const fetchMock = ccFetch({
     needs: { reviews: [review], inbox: [], dispatcher: { enabled: false, projects: [], activeRuns: 0, lastTickAt: null } },
-    projects: [{ projectPath: "C:/spy/marketplace", name: "Marketplace" }],
+    projects: [{ projectPath: "C:/work/marketplace", name: "Marketplace" }],
   });
   vi.stubGlobal("fetch", fetchMock);
   render(<App />);
@@ -516,47 +517,66 @@ test("control center renders markdown evidence as formatted elements, not litera
   expect(code.tagName).toBe("CODE");
 });
 
-test("control center emergency stop pauses the dispatcher and flips the armed pill", async () => {
-  const needs = { reviews: [], inbox: [], dispatcher: { enabled: true, projects: ["C:/repo"], activeRuns: 0, lastTickAt: new Date().toISOString() } };
-  const fetchMock = ccFetch({
-    needs,
-    extra: (s, options) => {
-      if (s.endsWith("/dispatcher") && options?.method === "POST") {
-        needs.dispatcher = { ...needs.dispatcher, enabled: false };
-        return Promise.resolve({ ok: true, json: async () => needs.dispatcher });
-      }
-    },
-  });
-  vi.stubGlobal("fetch", fetchMock);
-  render(<App />);
-  openControlCenter();
-  expect(await screen.findByText("Autopilot armed")).toBeInTheDocument();
-
-  fireEvent.click(screen.getByRole("button", { name: /EMERGENCY STOP/ }));
-  await screen.findByText("Autopilot paused");
-  const post = fetchMock.mock.calls.find(([u, o]) => String(u).endsWith("/dispatcher") && o?.method === "POST");
-  expect(JSON.parse(post[1].body)).toMatchObject({ agent: "human", enabled: false });
-});
-
-test("control center enrolls a project by POSTing the full updated projects array", async () => {
+test("control center sets a project's autonomy tier via /projects/tier, and shows what each tier means", async () => {
+  const projects = [{ projectPath: "C:/repo", name: "Repo", tier: "watch", pinned: false }, { projectPath: "C:/other", name: "Other", tier: "assist", pinned: false }];
   const needs = { reviews: [], inbox: [], dispatcher: { enabled: true, projects: [], activeRuns: 0, lastTickAt: new Date().toISOString() } };
   const fetchMock = ccFetch({
-    needs,
-    projects: [{ projectPath: "C:/repo", name: "Repo" }, { projectPath: "C:/other", name: "Other" }],
+    needs, projects,
     extra: (s, options) => {
-      if (s.endsWith("/dispatcher") && options?.method === "POST") {
-        needs.dispatcher = { ...needs.dispatcher, projects: JSON.parse(options.body).projects };
-        return Promise.resolve({ ok: true, json: async () => needs.dispatcher });
+      if (s.endsWith("/projects/tier") && options?.method === "POST") {
+        const { projectPath, tier } = JSON.parse(options.body);
+        const row = projects.find((p) => p.projectPath === projectPath);
+        row.tier = tier;
+        return Promise.resolve({ ok: true, json: async () => ({ updated: [{ projectPath, tier }], rejected: [] }) });
       }
     },
   });
   vi.stubGlobal("fetch", fetchMock);
   render(<App />);
   openControlCenter();
-  fireEvent.click(await screen.findByRole("button", { name: "Enroll Repo" }));
-  await waitFor(() => expect(fetchMock.mock.calls.some(([u, o]) => String(u).endsWith("/dispatcher") && o?.method === "POST")).toBe(true));
-  const post = fetchMock.mock.calls.find(([u, o]) => String(u).endsWith("/dispatcher") && o?.method === "POST");
-  expect(JSON.parse(post[1].body)).toMatchObject({ agent: "human", projects: ["C:/repo"] });
+
+  const repoTier = await screen.findByLabelText("Autonomy tier for Repo");
+  expect(repoTier).toHaveValue("watch");
+  expect(screen.getByLabelText("Autonomy tier for Other")).toHaveValue("assist");
+  // every tier carries its one-line meaning, so the dial is readable without the source
+  expect(screen.getByText("observe only — no agent is launched")).toBeInTheDocument();
+  expect(screen.getByText("do work, a human merges")).toBeInTheDocument();
+  expect(screen.getByText("full auto within confinement")).toBeInTheDocument();
+
+  fireEvent.change(repoTier, { target: { value: "auto" } });
+  await waitFor(() => expect(fetchMock.mock.calls.some(([u, o]) => String(u).endsWith("/projects/tier") && o?.method === "POST")).toBe(true));
+  const post = fetchMock.mock.calls.find(([u, o]) => String(u).endsWith("/projects/tier") && o?.method === "POST");
+  expect(JSON.parse(post[1].body)).toMatchObject({ agent: "human", projectPath: "C:/repo", tier: "auto" });
+  // the new tier is read back (this panel re-reads /projects; the app-level prop is fetched once)
+  await waitFor(() => expect(screen.getByLabelText("Autonomy tier for Repo")).toHaveValue("auto"));
+  // no legacy dispatcher.projects write: an explicit tier outranks that list, so writing it lied
+  expect(fetchMock.mock.calls.some(([u, o]) => String(u).endsWith("/dispatcher") && o?.method === "POST")).toBe(false);
+});
+
+test("control center renders the pinned live-money repo as locked at watch", async () => {
+  const fetchMock = ccFetch({
+    projects: [{ projectPath: "C:/work/master", name: "Trading System", tier: "watch", pinned: true }],
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  render(<App />);
+  openControlCenter();
+  const pinned = await screen.findByLabelText("Autonomy tier for Trading System");
+  expect(pinned).toHaveValue("watch");
+  expect(pinned).toBeDisabled();
+  expect(screen.getByText(/pinned at watch; it can never be promoted here/)).toBeInTheDocument();
+});
+
+test("blocked tasks show the date they come back, and flag one whose recheck is due", async () => {
+  const tasks = [
+    { id: "t-soon", projectPath: "C:/repo", title: "Waiting on App Review", status: "blocked", blockReason: "Apple", recheckAt: "2099-01-01" },
+    { id: "t-due", projectPath: "C:/repo", title: "Waiting on a budget", status: "blocked", blockReason: "money", recheckAt: "2000-01-01" },
+  ];
+  vi.stubGlobal("fetch", ccFetch({ tasks }));
+  render(<App />);
+  openControlCenter();
+  const failed = within(await screen.findByRole("region", { name: "Blocked tasks" }));
+  expect(failed.getByText("rechecks 2099-01-01")).toBeInTheDocument();
+  expect(failed.getByText("recheck due 2000-01-01")).toBeInTheDocument();
 });
 
 test("control center persists a capture-policy toggle via /settings", async () => {
@@ -575,14 +595,12 @@ test("control center persists a capture-policy toggle via /settings", async () =
   expect(JSON.parse(post[1].body)).toMatchObject({ agent: "human", key: "capturePolicy.decisions", value: false });
 });
 
-test("control center splits running and failed into their own cards; retry re-queues a failed task", async () => {
+test("blocked tasks card retries a blocked task; finished runs land in history", async () => {
   const runs = [
-    { id: "r1", taskId: "t-live", agent: "codex", startedAt: new Date().toISOString(), endedAt: null, outcome: null, lastEvent: "Editing storage.js" },
     { id: "r2", taskId: "t-done", agent: "claude-code", startedAt: new Date(Date.now() - 60000).toISOString(), endedAt: new Date().toISOString(), outcome: "success" },
     { id: "r3", taskId: "t-fail", agent: "codex", startedAt: new Date(Date.now() - 60000).toISOString(), endedAt: new Date().toISOString(), outcome: "fail" },
   ];
   const tasks = [
-    { id: "t-live", projectPath: "C:/repo", title: "Wire the dispatcher", status: "in_progress" },
     { id: "t-done", projectPath: "C:/repo", title: "Ship the parser", status: "review" },
     { id: "t-fail", projectPath: "C:/repo", title: "Broken migration", status: "blocked", assignedAgent: "codex", blockReason: "Agent exited with code 1" },
   ];
@@ -596,15 +614,11 @@ test("control center splits running and failed into their own cards; retry re-qu
   render(<App />);
   openControlCenter();
 
-  const running = within(await screen.findByRole("region", { name: "Running agents" }));
-  expect(running.getByText("Wire the dispatcher")).toBeInTheDocument();
-  expect(running.getByText("RUNNING")).toBeInTheDocument();
-
-  const failed = within(screen.getByRole("region", { name: "Failed runs" }));
+  const failed = within(await screen.findByRole("region", { name: "Blocked tasks" }));
   expect(failed.getByText("Broken migration")).toBeInTheDocument();
-  expect(failed.getByText("FAILED")).toBeInTheDocument();
+  expect(failed.getByText("BLOCKED")).toBeInTheDocument();
 
-  // the finished/done run lands in the collapsible history, not the main column
+  // finished runs land in the collapsible history, not the main column
   const history = within(screen.getByRole("region", { name: "Run history" }));
   expect(history.getByText("Ship the parser")).toBeInTheDocument();
 
@@ -614,71 +628,45 @@ test("control center splits running and failed into their own cards; retry re-qu
   expect(JSON.parse(patch[1].body)).toMatchObject({ action: "edit", status: "ready", agent: "human" });
 });
 
-test("control center view-log drawer tails a run's log; history exposes the same control", async () => {
+test("run history view-log drawer tails a run's log", async () => {
   const runs = [
-    { id: "r-live", taskId: "t-live", agent: "codex", startedAt: new Date().toISOString(), endedAt: null, outcome: null, lastEvent: "working" },
     { id: "r-old", taskId: "t-old", agent: "claude-code", startedAt: new Date(Date.now() - 60000).toISOString(), endedAt: new Date().toISOString(), outcome: "fail" },
   ];
   const tasks = [
-    { id: "t-live", projectPath: "C:/repo", title: "Wire the dispatcher", status: "in_progress" },
     { id: "t-old", projectPath: "C:/repo", title: "Night task", status: "blocked" },
   ];
   const fetchMock = ccFetch({
     runs, tasks,
     extra: (s) => {
-      if (s.includes("/runs/r-live/log")) return Promise.resolve({ ok: true, json: async () => ({ runId: "r-live", missing: false, lines: ["first line of log", "very last line of log"] }) });
+      if (s.includes("/runs/r-old/log")) return Promise.resolve({ ok: true, json: async () => ({ runId: "r-old", missing: false, lines: ["first line of log", "very last line of log"] }) });
     },
   });
   vi.stubGlobal("fetch", fetchMock);
   render(<App />);
   openControlCenter();
 
-  const running = within(await screen.findByRole("region", { name: "Running agents" }));
-  fireEvent.click(running.getByRole("button", { name: "View log for Wire the dispatcher" }));
+  const history = within(await screen.findByRole("region", { name: "Run history" }));
+  fireEvent.click(history.getByRole("button", { name: "View log for Night task", hidden: true }));
   const drawer = within(await screen.findByRole("dialog", { name: "Run log" }));
   expect(await drawer.findByText(/very last line of log/)).toBeInTheDocument();
   fireEvent.click(drawer.getByRole("button", { name: "Close" }));
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "Run log" })).not.toBeInTheDocument());
-
-  // finished runs in the history archive expose the same control (inside collapsed <details>)
-  const history = screen.getByRole("region", { name: "Run history" });
-  expect(within(history).getByRole("button", { name: "View log for Night task", hidden: true })).toBeInTheDocument();
-});
-
-test("queued card annotates dependency and earliest-start gates", async () => {
-  const tasks = [
-    { id: "p", projectPath: "C:/repo", title: "Producer", status: "ready", priority: "normal", assignedAgent: "claude-code" },
-    { id: "c", projectPath: "C:/repo", title: "Consumer", status: "ready", priority: "normal", assignedAgent: "claude-code", dependsOn: ["p"] },
-  ];
-  const fetchMock = ccFetch({ tasks, needs: { reviews: [], inbox: [], dispatcher: { enabled: true, projects: ["C:/repo"], activeRuns: 0, lastTickAt: null, window: null, windowOpen: true } } });
-  vi.stubGlobal("fetch", fetchMock);
-  render(<App />);
-  openControlCenter();
-  const queue = within(await screen.findByRole("region", { name: "Queued to dispatch" }));
-  expect(queue.getByText(/waiting on: Producer/)).toBeInTheDocument();
 });
 
 test("run history lists every finished run collapsibly, with no cap or toggle", async () => {
   const now = Date.now();
-  const runs = [
-    { id: "live", taskId: "t0", agent: "codex", startedAt: new Date(now).toISOString(), endedAt: null, outcome: null, lastEvent: "working" },
-    ...Array.from({ length: 10 }, (_, i) => ({
-      id: `h${i}`, taskId: `t${i + 1}`, agent: "claude-code",
-      startedAt: new Date(now - (i + 2) * 60000).toISOString(),
-      endedAt: new Date(now - (i + 1) * 60000).toISOString(), outcome: "success", notes: "done",
-    })),
-  ];
-  const tasks = [{ id: "t0", projectPath: "C:/repo", title: "Live one", status: "in_progress" },
-    ...Array.from({ length: 10 }, (_, i) => ({ id: `t${i + 1}`, projectPath: "C:/repo", title: `History run ${i + 1}`, status: "review" }))];
+  const runs = Array.from({ length: 10 }, (_, i) => ({
+    id: `h${i}`, taskId: `t${i + 1}`, agent: "claude-code",
+    startedAt: new Date(now - (i + 2) * 60000).toISOString(),
+    endedAt: new Date(now - (i + 1) * 60000).toISOString(), outcome: "success", notes: "done",
+  }));
+  const tasks = Array.from({ length: 10 }, (_, i) => ({ id: `t${i + 1}`, projectPath: "C:/repo", title: `History run ${i + 1}`, status: "review" }));
   vi.stubGlobal("fetch", ccFetch({ runs, tasks }));
   render(<App />);
   openControlCenter();
 
-  const running = within(await screen.findByRole("region", { name: "Running agents" }));
-  expect(running.getByText("Live one")).toBeInTheDocument();
-
   // all ten finished runs live in history (collapsed <details> keep them in the DOM); no cap, no expander
-  const history = within(screen.getByRole("region", { name: "Run history" }));
+  const history = within(await screen.findByRole("region", { name: "Run history" }));
   expect(history.getByText("History run 1")).toBeInTheDocument();
   expect(history.getByText("History run 10")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /older runs/ })).not.toBeInTheDocument();
@@ -707,35 +695,9 @@ test("control center token-spend panel ranks cost by model, project, and type", 
   expect(spend.getByText("By task type")).toBeInTheDocument();
 });
 
-test("control center scheduler panel persists the run window", async () => {
-  const fetchMock = ccFetch({ needs: { reviews: [], inbox: [], dispatcher: { enabled: false, projects: [], activeRuns: 0, lastTickAt: null, window: null, windowOpen: true } } });
-  vi.stubGlobal("fetch", fetchMock);
-  render(<App />);
-  openControlCenter();
-  const panel = within((await screen.findByText("Scheduler")).closest("details"));
-  fireEvent.click(panel.getByLabelText("Enable run window"));
-  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/v1/dispatcher", expect.objectContaining({ method: "POST" })));
-});
-
-test("scheduler panel sets concurrency; a run shows its PR link", async () => {
-  const runs = [{ id: "r1", taskId: "t1", agent: "claude-code", status: "running", startedAt: new Date().toISOString(), branch: "autopilot/t1", prUrl: "https://gh/pr/9" }];
-  const fetchMock = ccFetch({ runs, needs: { reviews: [], inbox: [], dispatcher: { enabled: true, projects: ["C:/repo"], activeRuns: 1, lastTickAt: null, window: null, windowOpen: true, maxConcurrent: 1, maxPerProject: 1 } } });
-  vi.stubGlobal("fetch", fetchMock);
-  render(<App />);
-  openControlCenter();
-  const sched = within((await screen.findByText("Scheduler")).closest("details"));
-  fireEvent.change(sched.getByLabelText("Max concurrent runs"), { target: { value: "3" } });
-  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/v1/dispatcher", expect.objectContaining({ method: "POST" })));
-  const post = fetchMock.mock.calls.find(([u, o]) => String(u).endsWith("/dispatcher") && o?.method === "POST");
-  expect(JSON.parse(post[1].body)).toMatchObject({ maxConcurrent: 3 });
-  // the running run surfaces its PR
-  expect(screen.getByRole("link", { name: /PR/ })).toHaveAttribute("href", "https://gh/pr/9");
-});
-
-test("tasks: assigning an agent inline PATCHes edit, and the dispatch cue marks ready+assigned tasks", async () => {
-  // ready + agent + no schedule => dispatchable (cue shown); ready + unassigned => not
+test("tasks: assigning an agent inline PATCHes edit", async () => {
   const tasks = [
-    { id: "t-cue", projectPath: "C:/repo", title: "Dispatchable task", status: "ready", priority: "normal", assignedAgent: "codex" },
+    { id: "t-cue", projectPath: "C:/repo", title: "Assigned task", status: "ready", priority: "normal", assignedAgent: "codex" },
     { id: "t-plain", projectPath: "C:/repo", title: "Unassigned task", status: "ready", priority: "normal" },
   ];
   const fetchMock = vi.fn().mockImplementation((path, options) => {
@@ -750,11 +712,7 @@ test("tasks: assigning an agent inline PATCHes edit, and the dispatch cue marks 
   render(<App />);
   fireEvent.click(within(screen.getByRole("navigation", { name: "Primary" })).getByRole("button", { name: "Tasks" }));
 
-  // dispatch cue (inline ⚡) only on the ready + assigned task
-  expect(await screen.findByLabelText("Dispatchable")).toBeInTheDocument();
-  expect(screen.getAllByLabelText("Dispatchable")).toHaveLength(1);
-
-  fireEvent.change(screen.getByLabelText("Assign agent for Unassigned task"), { target: { value: "claude-code" } });
+  fireEvent.change(await screen.findByLabelText("Assign agent for Unassigned task"), { target: { value: "claude-code" } });
   await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/v1/tasks/t-plain", expect.objectContaining({ method: "PATCH" })));
   const patch = fetchMock.mock.calls.find(([u, o]) => String(u).endsWith("/tasks/t-plain") && o?.method === "PATCH");
   expect(JSON.parse(patch[1].body)).toMatchObject({ agent: "human", action: "edit", assignedAgent: "claude-code" });

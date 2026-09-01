@@ -10,7 +10,10 @@ function response(body, ok = true) {
 
 function mockPanels(overrides = {}) {
   const data = {
-    stats: { records: { fix: 12, research: 2 }, captureTotal: 4 },
+    stats: {
+      records: { fix: 12, research: 2 }, captureTotal: 4,
+      tokensPerDistinctCitation: 6435, recallCitedBriefSourced: 21, recallPulledCount: 3,
+    },
     tasks: [{ id: "task-1", title: "Fix gate", status: "blocked", blockReason: "one test fails" }],
     inbox: [{ id: "inbox-1", message: "Clarify retention" }],
     activity: [],
@@ -47,6 +50,17 @@ test("ranks inbox items and blocked tasks", async () => {
   expect(within(queue).getByText("Resolve human inbox item")).toBeInTheDocument();
   expect(within(queue).getByText("Fix gate")).toBeInTheDocument();
   expect(screen.getByText("12")).toBeInTheDocument();
+});
+
+test("shows recall economics with the over-ceiling state flagged", async () => {
+  mockPanels();
+  render(<CommandCenter projectPath="C:/demo" onNavigate={vi.fn()} />);
+
+  const cost = await screen.findByText("6,435");
+  expect(cost.closest("article")).toHaveClass("metric-attention"); // over the 5,000 ceiling
+  expect(screen.getByText("Brief-sourced cites")).toBeInTheDocument();
+  expect(screen.getByText("Stub pulls")).toBeInTheDocument();
+  expect(screen.getByText("3")).toBeInTheDocument();
 });
 
 test("keeps useful panels visible when activity fails", async () => {

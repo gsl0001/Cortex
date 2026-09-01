@@ -1,15 +1,16 @@
 # Cortex
 
-**A local memory and autopilot layer for coding agents.**
+**A local memory and project-ops layer for coding agents.**
 
 ![Node](https://img.shields.io/badge/node-%E2%89%A5%2025-3c873a)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Tests](https://img.shields.io/badge/tests-386%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-399%20passing-brightgreen)
 ![Database](https://img.shields.io/badge/database-node%3Asqlite-informational)
 ![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex-8a63d2)
 
 Coding agents forget everything the moment a session ends. Cortex gives them a
-memory that persists — and, if you want it, a way to keep working while you sleep.
+memory that persists — and gives you one place to see, steer, and audit the work
+across every project they touch.
 
 It runs entirely on your machine: one Node process, one SQLite file, no external
 services, no data leaving your laptop. It works with **Claude Code** and **Codex**
@@ -18,12 +19,12 @@ out of the box.
 ![The Cortex command center — blocked work, unresolved questions, and recent captured memory, newest first](docs/dashboard.svg)
 
 > Your agent → the Cortex hub on `localhost:4317` → a memory that gets smarter
-> every session, a command center, and an optional autopilot.
+> every session, a command center, and an evening brief of what actually happened.
 
 **Contents:** [What it does](#what-it-does) · [How it works](#how-it-works) ·
 [The memory lifecycle](#the-memory-lifecycle) · [Quickstart](#quickstart) ·
 [Connect your agent](#connect-your-agent) · [Using the system](#using-the-system) ·
-[The dashboard](#the-dashboard) · [Autopilot](#autopilot) · [CLI reference](#cli-reference) ·
+[The dashboard](#the-dashboard) · [Autonomy tiers](#autonomy-tiers) · [CLI reference](#cli-reference) ·
 [Deploy](#deploy-with-docker) · [Security](#security-model)
 
 ---
@@ -39,15 +40,26 @@ of it — packed to fit a token budget you control.
 
 **🎛️ A command center.** A dark web dashboard that puts blocked work, unresolved
 questions, and recent activity first. Search across projects with explained
-scores, inspect the token pack, browse tasks and agent runs, run a database
+scores, inspect the token pack, browse tasks and the activity log, run a database
 audit, and explore an interactive graph of how your records connect.
 
-**🤖 Autopilot (optional).** Enroll a project and Cortex can pick up its ready
-tasks and run them autonomously — each in an isolated git worktree, with the
-right model for the job (heavier reasoning for features and bugs, cheaper models
-for chores), automatic review and verification, and a Telegram ping when
-something needs you or a run fails. A hard safety guard refuses to ever launch an
-agent against repos you mark off-limits.
+**🌆 An evening brief.** One command (`cortex eod`) turns the day's raw records
+into a report: what got done (with evidence), what needs your eyes, what's queued
+for tonight — as text, JSON, or a rendered HTML page, optionally pushed to
+Telegram. An optional agent layer rewrites each item into plain English and adds
+a short "story of the day"; if that fails for any reason, the deterministic SQL
+report stands untouched.
+
+**🩺 A portfolio doctor.** Cortex watches every project the hub knows about and
+tells you which are active, stalled, or quietly abandoned — with a per-project
+lifecycle you can set (`active`, `waiting`, `maintenance`, `archived`) so the
+noise stays down.
+
+**🎚️ Autonomy tiers.** Each project carries a dial — `watch`, `plan`, `assist`,
+`auto` — that says how much autonomy an orchestrator may take with it, and a
+pin (`CORTEX_NEVER_AUTOPILOT`) that locks protected repos at `watch` forever.
+Cortex itself never launches agents; it is the policy and memory surface an
+external runner reads.
 
 ---
 
@@ -55,7 +67,8 @@ agent against repos you mark off-limits.
 
 Cortex is a single local process. Your agents talk to it three ways — session
 hooks, an MCP server for mid-session calls, and a plain HTTP/CLI interface — and
-everything lands in one SQLite database that the dashboard and Autopilot both read.
+everything lands in one SQLite database that the dashboard, the evening brief,
+and the portfolio doctor all read.
 
 ```mermaid
 flowchart LR
@@ -64,10 +77,10 @@ flowchart LR
 
     subgraph HUB["Cortex hub · localhost:4317"]
       direction TB
-      CAP["Capture policy<br/>dedup + normalize"]
+      CAP["Capture policy<br/>dedup + quarantine + normalize"]
       DB[("SQLite<br/>node:sqlite")]
       LINK["Typed links (provenance)"]
-      IDX["Full-text index"]
+      IDX["Full-text index<br/>(porter-stemmed)"]
       RANK["Ranking engine"]
       CAP --> DB
       DB --> LINK
@@ -76,22 +89,23 @@ flowchart LR
     end
 
     WEB["Web command center"]
-    AP["Autopilot dispatcher"]
+    EOD["Evening brief"]
     TG["Telegram"]
 
     CC -->|"hooks: recall / capture"| CAP
     CC -.->|"MCP tools, mid-session"| CAP
     CX -->|"CLI / HTTP API"| CAP
     HUB --> WEB
-    HUB --> AP
-    AP -->|"spawn in git worktree"| CC
-    AP -->|"spawn in git worktree"| CX
-    AP -.->|"run failed / needs you"| TG
+    HUB --> EOD
+    EOD -.->|"daily report / needs you"| TG
 ```
 
 **No external dependencies for storage or search.** The database is Node's
 built-in `node:sqlite` (that's why it needs Node ≥ 25) and search is a
 deterministic local ranker — no vector database, no embedding API, no keys.
+If you *want* a semantic arm in the ranking, set `CORTEX_EMBEDDINGS=1` and
+Cortex blends embedding cosine similarity (via a local Ollama model,
+`nomic-embed-text` by default) with the keyword score — still fully local.
 
 ---
 
@@ -153,6 +167,11 @@ score  =  lexical relevance          (does the text match?)
         ─────────────────────────────
         then packed to fit your token budget
 ```
+
+Two more guards keep the brief honest: an off-topic filter drops records that
+name *another* project and never this one, and a `Supersedes: [m:id]` marker in
+any new decision cleanly retires the one it reverses instead of letting both
+rank forever.
 
 ---
 
@@ -216,8 +235,10 @@ project's `.mcp.json`:
 Use the **absolute path** to `src/mcp.js` in your Cortex checkout — your agent
 launches this from your project's directory, not Cortex's.
 
-Five tools are exposed: `memory_search`, `memory_remember`, `memory_recall_task`,
-`memory_update_task`, `memory_lesson`.
+Six tools are exposed: `memory_search`, `memory_get`, `memory_remember`,
+`memory_recall_task`, `memory_update_task`, `memory_lesson`. The session brief
+cites records by id (`[m:42]`); `memory_get` pulls the full record on demand, so
+the brief itself can stay a compact stub index.
 
 Codex uses the same CLI and HTTP API.
 
@@ -234,7 +255,7 @@ flowchart LR
     S3 --> S4["4 · Session ends<br/>Cortex captures the fix"]
     S4 --> S5["5 · Next session<br/>it recalls what matters"]
     S5 --> S3
-    S5 -.-> S6["6 · Optional: Autopilot<br/>runs ready tasks for you"]
+    S5 -.-> S6["6 · Evening: cortex eod<br/>the day, in one report"]
 ```
 
 1. **Start the hub** once — it stays running and serves the dashboard at
@@ -262,9 +283,11 @@ node src/cli.js task add --project ~/code/myapp --title "Rate-limit the export e
 node src/cli.js next-task --project ~/code/myapp --claim --agent claude-code
 ```
 
-7. **(Optional) Turn on Autopilot** for a project from the dashboard's Control
-   Center — Cortex will run its ready tasks in isolated worktrees and ping you on
-   Telegram when a run finishes or needs you. See [Autopilot](#autopilot).
+7. **End the day with one report.** `node src/cli.js eod --html reports/eod/today.html --notify`
+   builds the evening brief — done work with evidence, a verify queue, what's
+   blocked, tonight's open items — and can ping it to Telegram. Schedule it
+   (see [`scripts/eod-brief.ps1`](scripts/eod-brief.ps1) for a Windows Task
+   Scheduler example) and you get a daily digest for free.
 
 ---
 
@@ -275,42 +298,42 @@ attention first*:
 
 | Area | What it shows |
 |---|---|
-| **Command Center** | Blocked work, unresolved inbox questions, and recent activity — the "what's on fire" view |
+| **Command Center** | Blocked work, unresolved inbox questions, recent activity, and recall-economics cards — is the memory actually earning its tokens? |
+| **Control Center** | The per-project autonomy dial (`watch` → `auto`), with pinned repos clearly marked |
 | **Search** | Project-scoped search with **explained scores** and the exact token pack an agent would receive |
 | **Tasks** | Every task with type, priority, status, and its full history |
-| **Runs** | Autopilot agent runs, live status, and raw run logs |
 | **Goals / Roadmap** | Milestones, weekly plans, and roadmap proposals |
-| **Graph** | An interactive graph of records and their typed links — manual links are saved with full confidence, inferred ones keep their own provenance |
-| **Audit** | A read-only database health check you can run any time |
-| **Control Center** | Enroll/pause projects for Autopilot, set concurrency and run windows |
+| **Knowledge graph** | An interactive graph of records and their typed links — manual links are saved with full confidence, inferred ones keep their own provenance |
+| **Activity log** | A chronological feed of everything captured |
+| **Portfolio** | The portfolio doctor: which projects are active, stalled, or abandoned, with lifecycle controls |
+| **Health & audit** | A read-only database health check you can run any time |
 
 ---
 
-## Autopilot
+## Autonomy tiers
 
-Autopilot turns a backlog of ready tasks into finished, reviewed work — safely.
-Each task runs in a throwaway git worktree (never your working checkout), with the
-model matched to the task type, and every result is reviewed and verified before
-it can complete.
+Cortex does not launch agents. What it holds is the *policy*: a per-project dial
+that says how much autonomy an external orchestrator (your own runner, a cron
+job, a night-shift script) may take, readable over the same HTTP API as
+everything else.
 
-```mermaid
-flowchart TD
-    T["Ready tasks"] --> D{"Dispatcher<br/>run window + concurrency caps"}
-    D -->|"select next"| G{"In CORTEX_NEVER_AUTOPILOT?"}
-    G -->|"yes"| X["Refuse — human-only repo"]
-    G -->|"no"| W["Create isolated git worktree"]
-    W --> M["Route model<br/>Opus → feature / bug / research<br/>Sonnet → chore / docs / test"]
-    M --> SP["Spawn agent (workspace-write)"]
-    SP --> V{"Review + verify"}
-    V -->|"pass"| I["Integrate / merge"]
-    V -->|"fail"| N["Mark blocked + Telegram ping"]
-```
+| Tier | Meaning |
+|---|---|
+| `watch` | Remembered and reported; no agent process is ever launched |
+| `plan` | Agents may propose tasks and flag stalls; never execute |
+| `assist` | Runs only when a human releases a specific task |
+| `auto` | May work the ready queue autonomously; results always park for review |
 
-**Safety guard.** Set `CORTEX_NEVER_AUTOPILOT` to a comma-separated list of
-absolute paths that an agent must never be launched against (production repos,
-anything that moves money). The guard fires at the launch chokepoint itself, so
-both the dispatcher and a direct launch request are blocked. See
-[SETUP.md](SETUP.md#7-autopilot) for enrollment and tuning.
+Every project starts at `watch` — a newly-seen repo is never autonomous by
+default. Set a tier from the dashboard's Control Center or
+`POST /api/v1/projects/tier`.
+
+**The pin.** Set `CORTEX_NEVER_AUTOPILOT` to a comma-separated list of absolute
+paths (production repos, anything that moves money) and those projects are
+pinned at `watch` — a floor no setting write can raise. Entries are normalized
+like project paths themselves, so a subdirectory or mixed-separator spelling of
+a protected repo still collapses onto the pin. See
+[SETUP.md](SETUP.md#7-autonomy-tiers) for details.
 
 ---
 
@@ -325,8 +348,10 @@ Run `node src/cli.js` with no arguments for the full, always-current list.
 | **Capture** | `fix add`, `research add`, `session start`, `session finish` |
 | **Inbox** | `inbox add`, `inbox list`, `inbox resolve` |
 | **Planning** | `roadmap proposal-add`, `roadmap show`, `goals`, `week show`, `week auto-plan` |
+| **Portfolio** | `doctor --portfolio`, `project lifecycle`, `profile upsert` |
+| **Reports** | `eod` (evening brief: `--html`, `--notify`, `--digest`) |
 | **Agent hooks** | `claude install`, `claude recall`, `claude flush` |
-| **Maintenance** | `audit --all`, `maintenance sweep` |
+| **Maintenance** | `audit --all [--fix]`, `maintenance sweep`, `maintenance dedupe-decisions` |
 
 ```bash
 node src/cli.js search --project . --query "close fill" --max-tokens 1500
@@ -359,7 +384,7 @@ reverse proxy with TLS if you expose it beyond localhost.
 Only `CORTEX_TOKEN` is required. Everything else has a sensible default — see
 [`.env.example`](.env.example) for the common knobs (`CORTEX_DB`, `CORTEX_HOST`,
 `CORTEX_PORT`, `CORTEX_NEVER_AUTOPILOT`) and [`SETUP.md`](SETUP.md) for the full
-setup, agent adapters, and Autopilot details.
+setup, agent adapters, notifications, and the autonomy-tier details.
 
 ## Security model
 
@@ -369,17 +394,21 @@ setup, agent adapters, and Autopilot details.
   `CORTEX_TOKEN` is set — even on localhost.
 - **Reads are gated off-loopback.** When bound beyond loopback, read endpoints
   require the token too — not just writes.
-- **Autopilot is fenced.** Agents run in throwaway git worktrees, never your main
-  checkout, and repos listed in `CORTEX_NEVER_AUTOPILOT` can never be launched.
-- **Treat `CORTEX_TOKEN` like an SSH key.** Autopilot spawns coding agents and runs
-  task verification commands automatically, so a leaked token means code execution
-  on the host, not just read access. Keep the hub on loopback unless you front it
-  with an authenticating reverse proxy over TLS.
+- **Captured text is quarantined.** Session captures that look like prompt
+  injection ("ignore previous instructions…", and a broad family of phrasings)
+  are flagged on the way in, so a poisoned transcript can't smuggle instructions
+  into a future session's brief.
+- **Autonomy is pinned, not promised.** Repos listed in `CORTEX_NEVER_AUTOPILOT`
+  are locked at the `watch` tier — no API write can raise them.
+- **Treat `CORTEX_TOKEN` like an SSH key.** The hub schedules local CLI jobs
+  (transcript distillation, the evening digest), so treat a leaked token as more
+  than read access. Keep the hub on loopback unless you front it with an
+  authenticating reverse proxy over TLS.
 
 ## Development
 
 ```bash
-npm test            # backend suite (node:test) — 335 tests
+npm test            # backend suite (node:test) — 348 tests
 npm run web:test    # web UI tests (vitest) — 51 tests
 npm run web:build   # production build
 ```

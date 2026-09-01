@@ -40,7 +40,7 @@ test("installs Claude Code local hooks for session start, prompt recall, and sto
   await withProject(async ({ dir }) => {
     const settingsPath = await installClaudeAdapter({
       projectPath: dir,
-      cortexBin: "cortex",
+      cortexBin: "node C:\\work\\cortex\\src\\cli.js",
       dbPath: join(dir, ".cortex", "cortex.sqlite"),
     });
     const settings = JSON.parse(await readFile(settingsPath, "utf8"));
@@ -60,7 +60,7 @@ test("builds Claude additional context from the compact project brief", async ()
   await withProject(async ({ dir, hub }) => {
     hub.upsertProjectProfile({
       projectPath: dir,
-      name: "SPY Master",
+      name: "Alpha Project",
       mode: "paper-trading ops",
       summary: "Audit logs before editing live trading behavior.",
       standardCommands: ["python scripts/eod_audit.py YYYY-MM-DD"],
@@ -73,9 +73,10 @@ test("builds Claude additional context from the compact project brief", async ()
       verificationCommand: "curl /api/orchestrator/status",
     });
 
-    const output = createClaudeHookContext(hub, {
+    const output = await createClaudeHookContext(hub, {
       hook_event_name: "UserPromptSubmit",
       cwd: dir,
+      branch: "check-orchestrator-logs",
       prompt: "check logs see what happened",
     });
 
@@ -103,7 +104,7 @@ test("routes Claude stop messages through durable capture policy", async () => {
       cwd: dir,
       last_assistant_message: "Fixed backup restore wording. Verification: npm run release:check passed",
     }, { client: offlineClient });
-    const brief = hub.buildBrief({ projectPath: dir });
+    const brief = hub.buildBrief({ projectPath: dir, context: { goalText: "backup restore wording" } });
 
     assert.equal(discarded.reason, "discarded_low_signal");
     assert.equal(accepted.reason, "accepted_fix");
@@ -145,7 +146,26 @@ test("flush reads the last assistant turn from transcript_path when message is a
     }, { client: offlineClient });
 
     assert.equal(accepted.reason, "accepted_fix");
-    assert.match(hub.buildBrief({ projectPath: dir }).text, /cache eviction bug/);
+    assert.match(hub.buildBrief({ projectPath: dir, context: { goalText: "cache eviction bug" } }).text, /cache eviction bug/);
+  });
+});
+
+test("flush reads the last assistant turn from transcript_path for Antigravity transcript format", async () => {
+  await withProject(async ({ dir, hub }) => {
+    const transcript = join(dir, "transcript_antigravity.jsonl");
+    await writeFile(transcript, [
+      JSON.stringify({ step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", content: "fix the thing" }),
+      JSON.stringify({ step_index: 1, source: "MODEL", type: "PLANNER_RESPONSE", content: "Fixed the cache eviction bug. Verification: npm test passed" }),
+    ].join("\n"));
+
+    const accepted = await flushClaudeStop(hub, {
+      hook_event_name: "Stop",
+      cwd: dir,
+      transcript_path: transcript,
+    }, { client: offlineClient });
+
+    assert.equal(accepted.reason, "accepted_fix");
+    assert.match(hub.buildBrief({ projectPath: dir, context: { goalText: "cache eviction bug" } }).text, /cache eviction bug/);
   });
 });
 
@@ -190,26 +210,26 @@ test("SessionStart recall sweeps expired records; per-prompt recall does not", a
       summary: "stale", expiresAt: past,
     });
 
-    createClaudeHookContext(hub, { hook_event_name: "UserPromptSubmit", cwd: dir });
+    await createClaudeHookContext(hub, { hook_event_name: "UserPromptSubmit", cwd: dir });
     assert.equal(hub.storage.listSessionEvents(dir).length, 1, "prompt recall must not sweep");
 
-    createClaudeHookContext(hub, { hook_event_name: "SessionStart", cwd: dir });
+    await createClaudeHookContext(hub, { hook_event_name: "SessionStart", cwd: dir });
     assert.equal(hub.storage.listSessionEvents(dir).length, 0, "session start should sweep");
   });
 });
 
 test("SessionStart opens an agent session and Stop closes it", async () => {
   await withProject(async ({ dir, hub }) => {
-    createClaudeHookContext(hub, {
+    await createClaudeHookContext(hub, {
       hook_event_name: "SessionStart", cwd: dir, session_id: "sess-1", branch: "feat/x",
     });
     let active = hub.storage.listActiveSessions(dir);
     assert.equal(active.length, 1);
     assert.equal(active[0].id, "sess-1");
-    assert.match(hub.buildBrief({ projectPath: dir }).text, /Active Agent Sessions[\s\S]*claude-code/);
+    assert.match(hub.buildBrief({ projectPath: dir, context: { branch: "feat/x" } }).text, /Active Agent Sessions[\s\S]*claude-code/);
 
     // Re-fired SessionStart must not create a duplicate or throw.
-    createClaudeHookContext(hub, { hook_event_name: "SessionStart", cwd: dir, session_id: "sess-1" });
+    await createClaudeHookContext(hub, { hook_event_name: "SessionStart", cwd: dir, session_id: "sess-1" });
     assert.equal(hub.storage.listActiveSessions(dir).length, 1);
 
     await flushClaudeStop(hub, { hook_event_name: "Stop", cwd: dir, session_id: "sess-1", last_assistant_message: "done" }, { client: offlineClient });
@@ -232,7 +252,7 @@ test("sweep reaps active sessions past the TTL (crashed agents)", async () => {
 
 test("recall records a recall_injected metric with token usage and agent", async () => {
   await withProject(async ({ dir, hub }) => {
-    createClaudeHookContext(hub, { cwd: dir });
+    await createClaudeHookContext(hub, { cwd: dir });
     const events = hub.storage.listMetrics(dir, { kind: "recall_injected" });
     assert.equal(events.length, 1);
     assert.equal(typeof events[0].payload.usedTokens, "number");
@@ -243,7 +263,7 @@ test("recall records a recall_injected metric with token usage and agent", async
 
 test("recall_injected attributes agent_type for non-Claude adapters (e.g. codex)", async () => {
   await withProject(async ({ dir, hub }) => {
-    createClaudeHookContext(hub, { cwd: dir, agent_type: "codex" });
+    await createClaudeHookContext(hub, { cwd: dir, agent_type: "codex" });
     const events = hub.storage.listMetrics(dir, { kind: "recall_injected" });
     assert.equal(events[0].payload.agent, "codex");
   });
@@ -254,7 +274,7 @@ test("recall_useful fires when a fix lands on a file the last recall injected", 
     hub.storage.insertFix({ id: "seed", projectPath: dir, agent: "a", summary: "seed fix for retry logic", filesChanged: ["retry.js"], verification: "npm test passed" });
 
     // this recall injects the seed fix (retry.js) into the brief
-    createClaudeHookContext(hub, { cwd: dir });
+    await createClaudeHookContext(hub, { cwd: dir, branch: "retry-hardening" });
     const injected = hub.storage.listMetrics(dir, { kind: "recall_injected" })[0];
     assert.ok(injected.payload.injectedFilesChanged.includes("retry.js"));
 
@@ -273,7 +293,7 @@ test("recall_useful fires when a fix lands on a file the last recall injected", 
 test("recall_useful does not fire when the new fix touches unrelated files", async () => {
   await withProject(async ({ dir, hub }) => {
     hub.storage.insertFix({ id: "seed", projectPath: dir, agent: "a", summary: "seed fix for retry logic", filesChanged: ["retry.js"], verification: "npm test passed" });
-    createClaudeHookContext(hub, { cwd: dir });
+    await createClaudeHookContext(hub, { cwd: dir });
 
     hub.captureCandidate({ projectPath: dir, agent: "claude-code", message: "Fixed unrelated parser bug. Files changed: parser.js. Verification: npm test passed" });
 
@@ -288,7 +308,7 @@ test("recall_useful stays quiet when the matched file spans several injected rec
     hub.storage.insertFix({ id: "seed-a", projectPath: dir, agent: "a", summary: "hardened request routing paths", filesChanged: ["server.js"], verification: "npm test passed" });
     hub.storage.insertFix({ id: "seed-b", projectPath: dir, agent: "a", summary: "tightened settings allowlist checks", filesChanged: ["server.js"], verification: "npm test passed" });
     hub.storage.insertFix({ id: "seed-c", projectPath: dir, agent: "a", summary: "cleaned response encoding defaults", filesChanged: ["server.js"], verification: "npm test passed" });
-    createClaudeHookContext(hub, { cwd: dir });
+    await createClaudeHookContext(hub, { cwd: dir, branch: "server-hotfile" });
     const injected = hub.storage.listMetrics(dir, { kind: "recall_injected" })[0];
     assert.ok(injected.payload.injectedFilesChanged.includes("server.js"));
 
@@ -314,18 +334,18 @@ test("recall_useful legacy payloads (no per-record data) fall back to the narrow
 
 test("first real prompt replaces the placeholder session goal, later prompts don't", async () => {
   await withProject(async ({ dir, hub }) => {
-    createClaudeHookContext(hub, {
+    await createClaudeHookContext(hub, {
       hook_event_name: "SessionStart", cwd: dir, session_id: "sg-1",
     });
     assert.equal(hub.storage.getSession("sg-1").goal, "active session");
 
-    createClaudeHookContext(hub, {
+    await createClaudeHookContext(hub, {
       hook_event_name: "UserPromptSubmit", cwd: dir, session_id: "sg-1",
       prompt: "Fix the paywall gating bug in Sifter",
     });
     assert.equal(hub.storage.getSession("sg-1").goal, "Fix the paywall gating bug in Sifter");
 
-    createClaudeHookContext(hub, {
+    await createClaudeHookContext(hub, {
       hook_event_name: "UserPromptSubmit", cwd: dir, session_id: "sg-1",
       prompt: "now run the tests",
     });
@@ -333,14 +353,34 @@ test("first real prompt replaces the placeholder session goal, later prompts don
   });
 });
 
+test("a still-placeholder session goal does not gate the brief on a branch-less prompt hook", async () => {
+  await withProject(async ({ dir, hub }) => {
+    // a verified fix whose text shares no token with the placeholder "work on master"
+    hub.captureCandidate({ projectPath: dir, agent: "claude-code",
+      message: "Fixed the paywall subscription gate. Files changed: src/paywall.js. Verification: npm test passed." });
+    // SessionStart on a branch left the placeholder goal "work on master" (never enriched)
+    hub.storage.insertSession({ id: "sess-gate", projectPath: dir, agent: "claude-code",
+      source: "claude-session-hook", goal: "work on master", branch: "master", dirtyFiles: [], status: "active" });
+    // a later prompt hook WITHOUT a branch must still recognize the placeholder via the stored
+    // session branch — its lone term "work" must NOT leak into goalText. Since audit V a truly
+    // signal-less session gets the deliberate minimal brief (memory withheld + pull hint), not
+    // a gated-empty full brief and not placeholder-term-filtered records.
+    const out = await createClaudeHookContext(hub, {
+      hook_event_name: "UserPromptSubmit", cwd: dir, session_id: "sess-gate",
+    });
+    assert.match(out.hookSpecificOutput.additionalContext, /memory withheld/);
+    assert.doesNotMatch(out.hookSpecificOutput.additionalContext, /paywall subscription/);
+  });
+});
+
 test("a long first prompt is truncated to ~140 chars for the goal", async () => {
   await withProject(async ({ dir, hub }) => {
-    createClaudeHookContext(hub, {
+    await createClaudeHookContext(hub, {
       hook_event_name: "SessionStart", cwd: dir, session_id: "sg-3",
     });
 
     const longPrompt = "Investigate and fix the recurring flaky test failure in the checkout integration suite that only reproduces under CI load with concurrent workers enabled";
-    createClaudeHookContext(hub, {
+    await createClaudeHookContext(hub, {
       hook_event_name: "UserPromptSubmit", cwd: dir, session_id: "sg-3", prompt: longPrompt,
     });
 
@@ -352,17 +392,17 @@ test("a long first prompt is truncated to ~140 chars for the goal", async () => 
 
 test("a legitimate 'work on ...' first prompt is not mistaken for a placeholder later", async () => {
   await withProject(async ({ dir, hub }) => {
-    createClaudeHookContext(hub, {
+    await createClaudeHookContext(hub, {
       hook_event_name: "SessionStart", cwd: dir, session_id: "sg-4",
     });
 
-    createClaudeHookContext(hub, {
+    await createClaudeHookContext(hub, {
       hook_event_name: "UserPromptSubmit", cwd: dir, session_id: "sg-4",
       prompt: "work on the paywall refactor",
     });
     assert.equal(hub.storage.getSession("sg-4").goal, "work on the paywall refactor");
 
-    createClaudeHookContext(hub, {
+    await createClaudeHookContext(hub, {
       hook_event_name: "UserPromptSubmit", cwd: dir, session_id: "sg-4",
       prompt: "now run the tests",
     });
@@ -372,16 +412,16 @@ test("a legitimate 'work on ...' first prompt is not mistaken for a placeholder 
 
 test("slash-command prompts do not become the goal; a later real prompt does", async () => {
   await withProject(async ({ dir, hub }) => {
-    createClaudeHookContext(hub, {
+    await createClaudeHookContext(hub, {
       hook_event_name: "SessionStart", cwd: dir, session_id: "sg-5",
     });
 
-    createClaudeHookContext(hub, {
+    await createClaudeHookContext(hub, {
       hook_event_name: "UserPromptSubmit", cwd: dir, session_id: "sg-5", prompt: "/compact",
     });
     assert.equal(hub.storage.getSession("sg-5").goal, "active session", "slash command leaves the placeholder");
 
-    createClaudeHookContext(hub, {
+    await createClaudeHookContext(hub, {
       hook_event_name: "UserPromptSubmit", cwd: dir, session_id: "sg-5",
       prompt: "Fix the flaky checkout test",
     });
@@ -391,7 +431,7 @@ test("slash-command prompts do not become the goal; a later real prompt does", a
 
 test("flush stores a truncated outcome on the finished session", async () => {
   await withProject(async ({ dir, hub }) => {
-    createClaudeHookContext(hub, {
+    await createClaudeHookContext(hub, {
       hook_event_name: "SessionStart", cwd: dir, session_id: "sg-2",
     });
 
@@ -414,13 +454,66 @@ test("a Stop-hook Handoff note surfaces at the top of the next same-branch brief
     }, { client: offlineClient });
 
     // a same-branch SessionStart picks it up, at the top of the brief text
-    const sameBranch = createClaudeHookContext(hub, { hook_event_name: "SessionStart", cwd: dir, branch: "feat/mcp" });
+    const sameBranch = await createClaudeHookContext(hub, { hook_event_name: "SessionStart", cwd: dir, branch: "feat/mcp" });
     const text = sameBranch.hookSpecificOutput.additionalContext;
     assert.match(text, /Handoff \(picking up from last session\): wired 4 of 5 MCP tools/);
-    assert.ok(text.indexOf("Handoff") < text.indexOf("Inbox"), "handoff appears before the rest of the brief");
+    // compare against the always-rendered footer — empty sections (like Inbox here) are elided
+    assert.ok(text.indexOf("Handoff") < text.indexOf("Next Recommended Command"), "handoff appears before the rest of the brief");
 
     // a different branch does not see it
-    const otherBranch = createClaudeHookContext(hub, { hook_event_name: "SessionStart", cwd: dir, branch: "main" });
+    const otherBranch = await createClaudeHookContext(hub, { hook_event_name: "SessionStart", cwd: dir, branch: "main" });
     assert.doesNotMatch(otherBranch.hookSpecificOutput.additionalContext, /Handoff \(picking up/);
+  });
+});
+
+test("the first real prompt sets the session goal BEFORE its own brief is ranked", async () => {
+  await withProject(async ({ dir, hub }) => {
+    await createClaudeHookContext(hub, {
+      hook_event_name: "SessionStart", cwd: dir, session_id: "goal-order-1", branch: "master",
+    });
+    // Before this fix buildBrief ran first, so prompt #1 was ranked against the placeholder goal
+    // and the goal only took effect from prompt #2 — the full-budget injection was the one with
+    // nothing to be relevant to (value audit IV / independent audit finding 1).
+    await createClaudeHookContext(hub, {
+      hook_event_name: "UserPromptSubmit", cwd: dir, session_id: "goal-order-1", branch: "master",
+      prompt: "fix the paywall restore flow",
+    });
+
+    const session = hub.storage.getSession("goal-order-1");
+    assert.equal(session.goal, "fix the paywall restore flow", "goal is enriched on prompt #1, not prompt #2");
+
+    const injected = hub.storage.listMetrics(dir, { kind: "recall_injected", limit: 5 })
+      .filter((m) => m.payload?.sessionId === "goal-order-1");
+    assert.equal(injected.length, 2, "SessionStart and prompt #1 both injected");
+    assert.notEqual(injected[0].payload.briefHash, injected[1].payload.briefHash,
+      "prompt #1's brief differs from the cold one, so delta suppression cannot swallow it");
+  });
+});
+
+test("a slash command does not become the session goal", async () => {
+  await withProject(async ({ dir, hub }) => {
+    await createClaudeHookContext(hub, {
+      hook_event_name: "SessionStart", cwd: dir, session_id: "goal-order-2", branch: "master",
+    });
+    await createClaudeHookContext(hub, {
+      hook_event_name: "UserPromptSubmit", cwd: dir, session_id: "goal-order-2", branch: "master",
+      prompt: "/compact",
+    });
+    const session = hub.storage.getSession("goal-order-2");
+    assert.notEqual(session.goal, "/compact");
+  });
+});
+
+test("a real goal is not overwritten by a later prompt", async () => {
+  await withProject(async ({ dir, hub }) => {
+    await createClaudeHookContext(hub, {
+      hook_event_name: "SessionStart", cwd: dir, session_id: "goal-order-3", branch: "master",
+    });
+    for (const prompt of ["fix the paywall restore flow", "now check the capture gate"]) {
+      await createClaudeHookContext(hub, {
+        hook_event_name: "UserPromptSubmit", cwd: dir, session_id: "goal-order-3", branch: "master", prompt,
+      });
+    }
+    assert.equal(hub.storage.getSession("goal-order-3").goal, "fix the paywall restore flow");
   });
 });

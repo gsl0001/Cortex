@@ -50,6 +50,14 @@ server.registerTool("memory_search", {
 }, async ({ projectPath, query, maxTokens }) =>
   asText(await request("GET", "/api/v1/search", { query: { project: projectPath, query, maxTokens } })));
 
+server.registerTool("memory_get", {
+  description: "Fetch one memory record in full by its citable [m:xxxxxx] id (as shown in briefs and JIT notes). Use when a one-line stub in the session brief looks relevant and you need the details.",
+  inputSchema: {
+    idPrefix: z.string().describe("The id from the brief, e.g. 'a1b2c3' or '[m:a1b2c3]'"),
+  },
+}, async ({ idPrefix }) =>
+  asText(await request("GET", "/api/v1/record", { query: { prefix: idPrefix.replace(/^\[?m:/, "").replace(/\]$/, ""), agent: AGENT } })));
+
 server.registerTool("memory_remember", {
   description: "Save a fix, research finding, or decision to permanent memory. Include verification evidence (e.g. 'Verification: npm test passed') so the record is trusted.",
   inputSchema: {

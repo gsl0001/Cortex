@@ -1,8 +1,8 @@
 # Cortex — Setup & Operations
 
 This covers everything beyond the [README](README.md) quickstart: the write
-token, agent adapters, the MCP server, Autopilot, notifications, deployment, and
-the full configuration reference.
+token, agent adapters, the MCP server, autonomy tiers, the evening brief,
+notifications, deployment, and the full configuration reference.
 
 ## 1. Prerequisites
 
@@ -78,43 +78,63 @@ the HTTP API for recall and capture.
 Hooks handle session boundaries. For an agent to search or save memory *during* a
 session, run `npm start` and register the MCP server in the project's `.mcp.json`
 (see the [README](README.md#mid-session-recall-mcp)). Exposed tools:
-`memory_search`, `memory_remember`, `memory_recall_task`, `memory_update_task`,
-`memory_lesson`.
+`memory_search`, `memory_get`, `memory_remember`, `memory_recall_task`,
+`memory_update_task`, `memory_lesson`. The session brief cites records by id
+(`[m:42]`); `memory_get` fetches the full record on demand.
 
-## 7. Autopilot
+## 7. Autonomy tiers
 
-Autopilot lets Cortex run a project's ready tasks autonomously.
+Cortex never launches agents itself. Each project instead carries a tier —
+`watch`, `plan`, `assist`, `auto`, lowest first — that says how much autonomy an
+*external* orchestrator may take with it. Every project starts at `watch`.
 
-- **Enroll** a project from the web UI's Control Center (or the `/api/v1/dispatcher`
-  endpoint). Enrollment is per-project and reversible.
-- Each task runs in an **isolated git worktree**, never your main checkout.
-- **Model routing** picks a heavier model for features/bugs/research and a cheaper
-  one for chores/docs/tests. Override per project via the `modelRouting` setting.
-- Runs are **reviewed and verified** before completion; failures are classified.
+- **Set a tier** from the web UI's Control Center, or
+  `POST /api/v1/projects/tier` with `{ "projectPath": "...", "tier": "auto" }`.
+- **Read tiers** from `GET /api/v1/projects` — each project row carries its
+  `tier` and whether it is pinned.
 
-### Safety guard (important)
+### The pin (important)
 
 Set `CORTEX_NEVER_AUTOPILOT` to a comma-separated list of absolute paths that an
-agent must **never** be launched against — production repos, anything that moves
-money, anything you don't want an autonomous agent touching:
+autonomous agent must **never** run against — production repos, anything that
+moves money, anything you don't want an agent touching:
 
 ```bash
 export CORTEX_NEVER_AUTOPILOT="/path/to/prod-repo,/path/to/another"
 ```
 
-The guard fires at the launch chokepoint itself, so both the dispatcher and a
-direct launch request are blocked. Enrollment of a listed repo is silently
-filtered out.
+Listed projects are pinned at `watch`: the API rejects any attempt to raise
+them, and a batch tier write lands the rest of the batch while reporting the
+pinned entries as rejected. Entries are normalized like project paths (resolve,
+git root, case, separators), so a subdirectory or alternate spelling of a
+protected repo still collapses onto the pin.
 
-## 8. Notifications (optional)
+## 8. The evening brief
 
-For overnight runs, Cortex can push "run failed" and "needs you" events to
-Telegram. It reuses the Claude Code Telegram channel config at
-`~/.claude/channels/telegram` (`TELEGRAM_BOT_TOKEN` in `.env` plus the first
-allowlisted chat id). No config present → notifications are simply disabled; the
-run pipeline is unaffected.
+`node src/cli.js eod` builds a deterministic end-of-day report straight from
+SQL — done work with evidence, a verify queue, blocked items, unresolved inbox
+notes, and tonight's open tasks. Flags:
 
-## 9. Deployment
+- `--html reports/eod/2026-08-31.html` — also render a standalone HTML page.
+- `--notify` — push the summary to Telegram (see §9).
+- `--digest` — one batched headless-`claude` call rewrites each item into plain
+  English and adds a short "story of the day". Strictly additive: if the CLI is
+  missing, auth expired, or the output is malformed, the SQL report stands
+  untouched and the footer names the error.
+- `--date 2026-08-30` / `--json` — pick a day, or emit machine-readable output.
+
+[`scripts/eod-brief.ps1`](scripts/eod-brief.ps1) is a ready-made Windows Task
+Scheduler wrapper; on macOS/Linux an equivalent cron line is
+`45 17 * * * cd /path/to/cortex && node src/cli.js eod --notify --digest`.
+
+## 9. Notifications (optional)
+
+Cortex can push the evening brief and "needs you" events to Telegram. It reuses
+the Claude Code Telegram channel config at `~/.claude/channels/telegram`
+(`TELEGRAM_BOT_TOKEN` in `.env` plus the first allowlisted chat id). No config
+present → notifications are simply disabled; everything else is unaffected.
+
+## 10. Deployment
 
 See the [Docker section in the README](README.md#deploy-with-docker). Key points:
 
@@ -123,7 +143,7 @@ See the [Docker section in the README](README.md#deploy-with-docker). Key points
 - The database lives on the `/data` volume — mount it so data survives restarts.
 - If you expose Cortex beyond localhost, put it behind a reverse proxy with TLS.
 
-## 10. Configuration reference
+## 11. Configuration reference
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -131,15 +151,19 @@ See the [Docker section in the README](README.md#deploy-with-docker). Key points
 | `CORTEX_DB` | `~/.cortex/cortex.sqlite` | Database file path. |
 | `CORTEX_HOST` | `127.0.0.1` | Bind address. |
 | `CORTEX_PORT` | `4317` | Bind port. |
-| `CORTEX_ALLOW_REMOTE` | `0` | Allow binding a non-loopback host (requires a token). |
-| `CORTEX_NEVER_AUTOPILOT` | *(empty)* | Comma-separated absolute paths agents must never run against. |
+| `CORTEX_ALLOW_REMOTE` | `0` | Allow binding a non-loopback host (requires a token; reads become token-gated too). |
+| `CORTEX_NEVER_AUTOPILOT` | *(empty)* | Comma-separated absolute paths pinned at the `watch` tier forever. |
+| `CORTEX_EMBEDDINGS` | `0` | Set `1` to add a semantic arm to brief ranking (local Ollama embeddings). |
+| `CORTEX_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama endpoint for embeddings. |
+| `CORTEX_EMBED_MODEL` | `nomic-embed-text` | Embedding model name. |
+| `CORTEX_TOPIC_SCOPE` | `1` | Set `0` to disable the off-topic brief filter. |
 | `CORTEX_INBOX_TTL_DAYS`, `CORTEX_METRICS_RETENTION_DAYS`, `CORTEX_SESSION_TTL_HOURS`, … | various | Retention windows. |
-| `CORTEX_BRIEF_TOKENS`, `CORTEX_DEDUP_THRESHOLD`, `CORTEX_AGENT_TIMEOUT_MIN`, … | various | Token budgets, dedup, and agent-run tuning. |
+| `CORTEX_BRIEF_TOKENS`, `CORTEX_BRIEF_SEMANTIC_WEIGHT`, `CORTEX_DEDUP_THRESHOLD`, `CORTEX_FIX_HALF_LIFE_DAYS`, … | various | Token budgets, ranking, and dedup tuning. |
 
 The advanced knobs all have sensible defaults. For the complete list, grep the
 source: `grep -rho "process.env.CORTEX_[A-Z_]*" src | sort -u`.
 
-## 11. Back up & recover
+## 12. Back up & recover
 
 Stop the server before copying the database:
 
@@ -151,7 +175,7 @@ Restore by replacing the file while the server is stopped, then run
 `node src/cli.js index rebuild`. The audit (`node src/cli.js audit --all`) is
 read-only and safe to run any time.
 
-## 12. Verify your install
+## 13. Verify your install
 
 ```bash
 npm test

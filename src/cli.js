@@ -73,6 +73,7 @@ function usage() {
   cortex profile upsert --project . --name "Project" --mode "mode" --summary "summary"
   cortex task add --project . --title "Fix thing" --type bug --priority high
     (--type one of: feature|bug|chore|docs|test|research|infra — required)
+    (proof of done: --verify "<command>")
   cortex task claim --id <id> --agent claude-code
   cortex task block --id <id> --reason "missing adb"
   cortex task done --id <id> --evidence "npm test passed"
@@ -85,11 +86,15 @@ function usage() {
   cortex claude recall
   cortex claude flush
   cortex audit --all --json [--fix] [--apply]
+  cortex doctor --portfolio [--today 2026-07-30] [--json]
+  cortex project lifecycle --project . --state active
   cortex search --project . --query "close fill" --max-tokens 1500
   cortex index rebuild
   cortex brief --project .
   cortex stats --project . --json
+  cortex eod [--date 2026-08-07] [--json] [--html reports/eod/2026-08-07.html] [--notify] [--digest]
   cortex maintenance sweep
+  cortex maintenance dedupe-decisions [--project .] [--apply]   (dry-run without --apply)
   cortex inbox add --project . --author human --message "Prioritize the auth bug"
   cortex inbox list --project .
   cortex inbox resolve --project . --id <id>
@@ -105,7 +110,8 @@ List flags use comma-separated values: --files a.js,b.js --tags release,expo`;
 
 export async function runCli(argv = process.argv.slice(2)) {
   const {
-    createClaudeHookContext, createCortex, flushClaudeStop, flushCodexStop, installClaudeAdapter,
+    createClaudeHookContext, createCortex, flushClaudeStop, flushCodexStop,
+    formatPortfolioDoctor, installClaudeAdapter,
   } = await import("./index.js");
   const { positionals, flags } = parseArgs(argv);
   const [resource, action] = positionals;
@@ -194,15 +200,17 @@ export async function runCli(argv = process.argv.slice(2)) {
       }) };
     } else if (resource === "claude" && action === "recall") {
       const hookInput = readStdinJson();
-      result = createClaudeHookContext(hub, {
+      result = await createClaudeHookContext(hub, {
         ...hookInput,
         cwd: flags.project || hookInput.cwd || process.cwd(),
+        agent_type: flags.agent || hookInput.agent_type,
       });
     } else if (resource === "claude" && action === "flush") {
       const hookInput = readStdinJson();
       result = await flushClaudeStop(hub, {
         ...hookInput,
         cwd: flags.project || hookInput.cwd || process.cwd(),
+        agent_type: flags.agent || hookInput.agent_type,
       });
     } else if (resource === "codex" && (action === "recall" || action === "flush")) {
       const hookInput = readStdinJson();
@@ -213,7 +221,7 @@ export async function runCli(argv = process.argv.slice(2)) {
         cwd: flags.project || hookInput.cwd || process.cwd(),
       };
       // recall output is agent-neutral (same hookSpecificOutput); only capture differs by adapter
-      result = action === "recall" ? createClaudeHookContext(hub, merged) : await flushCodexStop(hub, merged);
+      result = action === "recall" ? await createClaudeHookContext(hub, merged) : await flushCodexStop(hub, merged);
     } else if (resource === "brief") {
       result = hub.buildBrief({ projectPath: flags.project || process.cwd() });
     } else if (resource === "audit") {
@@ -222,7 +230,16 @@ export async function runCli(argv = process.argv.slice(2)) {
         fix: Boolean(flags.fix),
         apply: Boolean(flags.apply),
       });
+    } else if (resource === "doctor" && (!action || flags.portfolio)) {
+      const report = hub.portfolioDoctor({ today: flags.today });
+      result = flags.json ? report : { text: formatPortfolioDoctor(report) };
+    } else if (resource === "project" && action === "lifecycle") {
+      result = hub.setProjectLifecycle({
+        projectPath: flags.project || process.cwd(),
+        state: flags.state,
+      });
     } else if (resource === "search") {
+      await hub.embeddingProvider.prepare?.(flags.query); // cosine scoring when Ollama is up; MinHash otherwise
       result = hub.search({
         projectPath: flags.project || process.cwd(),
         query: flags.query,
@@ -230,10 +247,54 @@ export async function runCli(argv = process.argv.slice(2)) {
         halfLifeDays: Number(flags["half-life-days"] || 30),
         includeSuperseded: Boolean(flags["include-superseded"]),
       });
+    } else if (resource === "eod") {
+      const { buildEodReport, collectDrift, renderEodText, renderEodHtml } = await import("./eod.js");
+      const { requireIsoDate } = await import("./commands.js");
+      if (flags.date) requireIsoDate(flags.date, "date");
+      const db = hub.storage.db;
+      const projects = db.prepare("SELECT project_path FROM project_profiles").all().map((r) => r.project_path);
+      const drift = collectDrift(projects);
+      const now = flags.date ? new Date(`${flags.date}T23:59:59`) : new Date();
+      const report = buildEodReport({ db, now, drift });
+      if (flags.digest) {
+        const { runDigest } = await import("./eodDigest.js");
+        runDigest(report);
+      }
+      // Health footer: server up, DB size. Checkout drift is already in verifyQueue.drift.
+      const hubUrl = process.env.CORTEX_HUB_URL || "http://127.0.0.1:4317";
+      report.health = await (async () => {
+        let server = "server DOWN";
+        try {
+          const res = await fetch(`${hubUrl}/api/v1/health`, { signal: AbortSignal.timeout(2000) });
+          if (res.ok) server = "server up";
+        } catch { /* stays DOWN */ }
+        let dbSize = "?";
+        try {
+          const { statSync } = await import("node:fs");
+          dbSize = `${(statSync(hub.storage.dbPath).size / 1024 / 1024).toFixed(1)}MB`;
+        } catch { /* size unknown */ }
+        return `${server} · db ${dbSize}`;
+      })();
+      if (flags.html) {
+        const { writeFileSync, mkdirSync } = await import("node:fs");
+        const { dirname } = await import("node:path");
+        mkdirSync(dirname(flags.html), { recursive: true });
+        writeFileSync(flags.html, renderEodHtml(report), "utf8");
+      }
+      if (flags.notify) {
+        const { createNotifier } = await import("./notify.js");
+        const notifier = createNotifier();
+        await notifier.push(`eod:${report.date}`, renderEodText(report));
+        if (flags.html) await notifier.pushDocument(flags.html, `Evening brief ${report.date}`);
+        if (!notifier.enabled) console.error("eod: telegram channel not configured, nothing sent");
+      }
+      result = flags.json ? report : { text: renderEodText(report) };
     } else if (resource === "stats") {
       result = hub.stats({ projectPath: flags.project || process.cwd(), since: flags.since });
     } else if (resource === "maintenance" && action === "sweep") {
       result = hub.sweep();
+    } else if (resource === "maintenance" && action === "dedupe-decisions") {
+      result = hub.dedupeDecisions({ projectPath: flags.project || null, apply: Boolean(flags.apply) });
     } else if (resource === "index" && action === "rebuild") {
       result = hub.rebuildIndex();
     } else if (resource === "index" && action === "drain") {
@@ -251,15 +312,6 @@ export async function runCli(argv = process.argv.slice(2)) {
       });
     } else if (resource === "inbox" && action === "resolve") {
       result = hub.resolveInbox({ projectPath: flags.project || process.cwd(), id: flags.id });
-    } else if (resource === "run" && action === "start") {
-      result = hub.startRun({ agent: flags.agent, taskId: flags.task, verificationCommand: flags.verify });
-    } else if (resource === "run" && action === "finish") {
-      result = hub.finishRun({
-        id: flags.id, verificationExit: flags.exit != null ? Number(flags.exit) : null,
-        tokens: flags.tokens != null ? Number(flags.tokens) : null,
-        toolCalls: flags["tool-calls"] != null ? Number(flags["tool-calls"]) : null,
-        outcome: flags.outcome, notes: flags.notes,
-      });
     } else if (resource === "roadmap" && action === "proposal-add") {
       if (!flags.file) throw new Error("--file is required");
       result = hub.createRoadmapProposal({

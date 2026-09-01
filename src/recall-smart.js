@@ -6,8 +6,8 @@
  */
 import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { createCortex, createClaudeHookContext } from "./index.js";
 import { loadRelevantMemories } from "./memoryFiles.js";
 
@@ -77,11 +77,14 @@ const configuredDirs = process.env.CORTEX_MEMORY_DIRS
     : profile?.externalMemoryDirs || [];
 const relevantMemories = loadRelevantMemories(configuredDirs, keywords);
 const hookPayload = readHookPayload();
-const result = createClaudeHookContext(hub, {
+const envAgent = (process.env.CORTEX_AGENT && process.env.CORTEX_AGENT !== "1" && process.env.CORTEX_AGENT !== "true" && process.env.CORTEX_AGENT) ||
+                 (process.env.ANTIGRAVITY_AGENT && process.env.ANTIGRAVITY_AGENT !== "1" && process.env.ANTIGRAVITY_AGENT !== "true" && process.env.ANTIGRAVITY_AGENT);
+
+const result = await createClaudeHookContext(hub, {
   hook_event_name: "SessionStart", // so the brief + retention sweep run as a session start
   cwd: PROJECT_PATH,
   session_id: hookPayload.session_id, // opens an agent session keyed on this id
-  agent_type: hookPayload.agent_type,
+  agent_type: hookPayload.agent_type || envAgent || "claude-code",
   branch,
   recentFiles,
   relevantMemories,

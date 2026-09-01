@@ -11,14 +11,14 @@ import { CortexStorage, normalizeProjectPath } from "../src/storage.js";
 // these tests assume no token unless a test sets one itself.
 delete process.env.CORTEX_TOKEN;
 
-async function withServer(run, { agentLauncher } = {}) {
+async function withServer(run) {
   process.env.CORTEX_TOKEN = "test-token"; // writes are default-deny without a configured token
   const dir = await mkdtemp(join(tmpdir(), "cortex-write-"));
   const hub = createCortex({ dbPath: join(dir, "w.sqlite") });
   const staticDir = join(dir, "dist");
   await mkdir(staticDir);
   await writeFile(join(staticDir, "index.html"), "<main>UI</main>");
-  const server = createCortexServer({ hub, staticDir, agentLauncher });
+  const server = createCortexServer({ hub, staticDir });
   const address = await server.start();
   const base = `http://${address.host}:${address.port}/api/v1`;
   const authed = { "content-type": "application/json", authorization: "Bearer test-token" };
@@ -38,6 +38,40 @@ test("WAL is active after opening storage", async () => {
   assert.equal(storage.db.prepare("PRAGMA journal_mode").get().journal_mode, "wal");
   storage.close();
   await rm(dir, { recursive: true, force: true });
+});
+
+test("portfolio doctor is read-only and lifecycle changes require an explicit authenticated write", async () => {
+  await withServer(async ({ base, dir, post, hub }) => {
+    hub.upsertProjectProfile({ projectPath: dir, name: "Portfolio app", mode: "product", summary: "Test" });
+    hub.addTask({ projectPath: dir, type: "chore", title: "Ship it" });
+
+    const before = await (await fetch(`${base}/portfolio/doctor?today=2026-07-30`)).json();
+    const row = before.rows.find(({ name }) => name === "Portfolio app");
+    assert.equal(row.lifecycle, "unclassified");
+    assert.equal(row.tasks.open, 1);
+    assert.ok(row.issues.some(({ code }) => code === "missing-evidence-contract"));
+
+    const changed = await post("/projects/lifecycle", {
+      agent: "human",
+      projectPath: dir,
+      state: "active",
+    });
+    assert.equal(changed.status, 200);
+    assert.equal((await changed.json()).state, "active");
+
+    const projects = await (await fetch(`${base}/projects`)).json();
+    assert.equal(projects[0].lifecycle, "active");
+    const after = await (await fetch(`${base}/portfolio/doctor?today=2026-07-30`)).json();
+    assert.ok(after.rows.find(({ name }) => name === "Portfolio app").issues
+      .some(({ code }) => code === "missing-active-goal"));
+
+    const bad = await post("/projects/lifecycle", {
+      agent: "human",
+      projectPath: dir,
+      state: "busy",
+    });
+    assert.equal(bad.status, 400);
+  });
 });
 
 test("capture endpoint runs the policy (chatter discarded, not raw-inserted)", async () => {
@@ -83,15 +117,21 @@ test("non-json content-type is rejected", async () => {
   });
 });
 
-test("task create then complete; completing without evidence is 400", async () => {
+test("an agent may not complete to done over HTTP; human completion validates evidence", async () => {
   await withServer(async ({ dir, post, patch }) => {
     const created = await post("/tasks", { projectPath: dir, agent: "claude", title: "Ship it", type: "chore", status: "ready" });
     assert.equal(created.status, 201);
     const id = (await created.json()).id;
-    const missing = await patch(`/tasks/${id}`, { agent: "claude", action: "complete" });
+    // an agent completing to done is refused — agents park in review for human sign-off
+    const byAgent = await patch(`/tasks/${id}`, { agent: "claude", action: "complete", evidence: "tests pass" });
+    assert.equal(byAgent.status, 400);
+    assert.match((await byAgent.json()).error.message, /may not set a task to 'done'/);
+    // human sign-off: missing evidence still 400
+    const missing = await patch(`/tasks/${id}`, { agent: "human", action: "complete" });
     assert.equal(missing.status, 400);
     assert.match((await missing.json()).error.message, /evidence is required/);
-    const done = await patch(`/tasks/${id}`, { agent: "claude", action: "complete", evidence: "tests pass" });
+    // human sign-off with evidence completes
+    const done = await patch(`/tasks/${id}`, { agent: "human", action: "complete", evidence: "tests pass" });
     assert.equal(done.status, 200);
     assert.equal((await done.json()).status, "done");
   });
@@ -101,7 +141,7 @@ test("a non-string evidence value is rejected, not silently stored as \"[object 
   await withServer(async ({ dir, post, patch }) => {
     const created = await post("/tasks", { projectPath: dir, agent: "claude", title: "Ship it", type: "chore", status: "ready" });
     const id = (await created.json()).id;
-    const res = await patch(`/tasks/${id}`, { agent: "claude", action: "complete", evidence: { nested: "object" } });
+    const res = await patch(`/tasks/${id}`, { agent: "human", action: "complete", evidence: { nested: "object" } });
     assert.equal(res.status, 400);
     assert.match((await res.json()).error.message, /evidence is required/);
   });
@@ -305,22 +345,6 @@ test("approving an unknown roadmap proposal is 404", async () => {
   });
 });
 
-test("launch endpoint validates the agent and returns tracked run", async () => {
-  const calls = [];
-  const agentLauncher = {
-    launch: async (input) => { calls.push(input); return { task: { id: input.taskId, status: "in_progress" }, run: { id: "run-1", status: "running" } }; },
-    stop: async () => {},
-  };
-  await withServer(async ({ dir, hub, post }) => {
-    const task = hub.addTask({ type: "chore", projectPath: dir, title: "Launch me", status: "ready" });
-    const bad = await post(`/tasks/${task.id}/launch`, { agent: "nope" });
-    assert.equal(bad.status, 400);
-    const response = await post(`/tasks/${task.id}/launch`, { agent: "codex" });
-    assert.equal(response.status, 202);
-    assert.deepEqual(calls, [{ taskId: task.id, agent: "codex" }]);
-  }, { agentLauncher });
-});
-
 test("task edit and guarded delete are exposed", async () => {
   await withServer(async ({ dir, hub, patch, del }) => {
     const task = hub.addTask({ type: "chore", projectPath: dir, title: "Old", status: "ready" });
@@ -371,29 +395,14 @@ test("POST /links rejects non-string entity ids cleanly instead of leaking a SQL
   });
 });
 
-test("POST /runs and PATCH /runs/:id are exercised over HTTP, not just the direct hub methods", async () => {
-  await withServer(async ({ dir, hub, post, patch }) => {
-    const task = hub.addTask({ type: "chore", projectPath: dir, title: "Verify UI", status: "ready" });
-    const created = await post("/runs", { agent: "codex", taskId: task.id, verificationCommand: "npm test" });
-    assert.equal(created.status, 201);
-    const run = await created.json();
-    assert.equal(run.status, "running");
-
-    const finished = await patch(`/runs/${run.id}`, { agent: "codex", verificationExit: 0, tokens: 42, outcome: "success" });
-    assert.equal(finished.status, 200);
-    assert.equal((await finished.json()).outcome, "success");
-
-    const missing = await patch("/runs/does-not-exist", { agent: "codex", outcome: "success" });
-    assert.equal(missing.status, 404);
-  });
-});
-
-test("POST /lessons is exercised over HTTP and the lesson surfaces in the brief", async () => {
+test("POST /lessons is exercised over HTTP and stores the lesson (JIT-served, not in the brief)", async () => {
   await withServer(async ({ dir, hub, post }) => {
     const res = await post("/lessons", { agent: "human", projectPath: dir, lesson: "Start the backend before trusting the Vite proxy." });
     assert.equal(res.status, 201);
     assert.equal((await res.json()).action, "accepted");
-    assert.match(hub.buildBrief({ projectPath: dir }).text, /Start the backend before trusting the Vite proxy/);
+    // audit III: lessons dropped from the brief (0/70 ever cited); still stored + JIT-served
+    assert.equal(hub.storage.listLessons(dir).length, 1);
+    assert.doesNotMatch(hub.buildBrief({ projectPath: dir }).text, /Start the backend before trusting the Vite proxy/);
   });
 });
 

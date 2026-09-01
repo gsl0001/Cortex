@@ -1,9 +1,12 @@
 import { LocalMinHashEmbeddingProvider } from "./embeddingProvider.js";
 import { normalizeProjectPath } from "./storage.js";
 
+// 2026-07-19 A/B on the live DB (9 ground-truth queries through this full pipeline):
+// shifting 0.10 from lexical to semantic moved median ground-truth rank 3 → 2 with zero
+// regressions, and the MinHash-fallback mode (Ollama down) also ranked equal-or-better.
 export const DEFAULT_WEIGHTS = Object.freeze({
-  lexical: 0.35,
-  semantic: 0.25,
+  lexical: 0.25,
+  semantic: 0.35,
   graph: 0.15,
   quality: 0.15,
   recency: 0.10,
@@ -69,9 +72,12 @@ export function searchMemory(storage, {
     const record = row.recordType === "fix" ? storage.getFix(row.id)
       : row.recordType === "decision" ? storage.getDecision(row.id)
       : storage.getResearch(row.id);
-    const searchable = `${row.title} ${row.body} ${row.tags}`.toLowerCase();
-    const lexical = terms.filter((term) => searchable.includes(term)).length / terms.length;
-    const semantic = semanticAvailable ? embeddingProvider.similarity(query, `${row.title} ${row.body}`) : 0;
+    // FTS5's bm25() (selected as `rank`, lower/more negative = better) replaces the old
+    // term-coverage ratio, which weighted "src" like "quarantine" and ignored term frequency
+    // and field length. Normalized into (0,1) so the weighted sum keeps its scale.
+    const bm25Goodness = Math.max(0, -Number(row.rank) || 0);
+    const lexical = bm25Goodness / (bm25Goodness + 1);
+    const semantic = semanticAvailable ? embeddingProvider.similarity(query, `${row.title} ${row.body}`, row.id) : 0;
     const graph = Math.min(1, (linkCounts.get(row.id) || 0) / 5);
     const recent = recency(record.createdAt, now, halfLifeDays);
     const quality = Math.min(1,
