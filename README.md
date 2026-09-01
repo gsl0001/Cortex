@@ -72,12 +72,15 @@ is for*:
 
 | | **Cortex** | Mem0 | Zep | Supermemory | Letta |
 |---|---|---|---|---|---|
-| **Price** | Free, MIT | Paid cloud (OSS core) | Paid cloud (community edition) | Paid API | Paid cloud (OSS core) |
-| **Your data lives** | Your machine, one SQLite file | Their cloud (or self-host) | Their cloud (or self-host) | Their cloud | Their cloud (or self-host) |
-| **Needs API keys / embeddings** | No — deterministic local ranking (embeddings optional, via local Ollama) | Yes (LLM + embeddings) | Yes | Yes | Yes (LLM) |
-| **Built for** | Coding agents specifically — hooks into Claude Code / Codex sessions | General AI-app memory | Agent memory / knowledge graph | General memory API | Stateful agent framework |
+| **Price** | Free, MIT | Free tier, then $19+/mo cloud (OSS core) | Paid cloud (~$125/mo Flex) | Free tier, then $19+/mo cloud (MIT OSS core) | Free tier, then $20+/mo cloud (Apache-2.0 core) |
+| **Your data lives** | Your machine, one SQLite file | Their cloud, or self-host (needs vector + graph DB) | Their cloud; DIY via the OSS Graphiti engine + a graph DB | Their cloud, or a self-hosted local binary | Their cloud, or self-hosted server |
+| **Needs LLM/embedding calls** | No — deterministic local ranking (embeddings optional, via local Ollama) | Yes (LLM + embeddings) | Yes | Yes (self-host can use Ollama) | Yes (BYOK) |
+| **Built for** | Coding agents specifically — hooks into Claude Code / Codex sessions | General AI-app memory | Agent memory / knowledge graph | General memory API + consumer app | Stateful agent framework |
 | **Beyond memory** | Tasks, roadmaps, evening brief, portfolio doctor, autonomy policy | — | — | — | Agent runtime |
-| **Setup** | `npm install`, `npm start` | SDK + account | SDK + account | SDK + account | SDK + account |
+| **Setup** | `npm install`, `npm start` — no accounts, no other services | SDK + account (or multi-service self-host) | SDK + account | SDK + account (or local binary) | SDK + account (or self-host server) |
+
+*(Competitor details checked August 2026 — pricing and self-host options move
+fast; check their sites for current terms.)*
 
 **Pick a paid platform when** you're building a *product* that needs memory for
 thousands of end users, managed scaling, and SLAs.
