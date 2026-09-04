@@ -1,3 +1,5 @@
+<img src="docs/logo.svg" alt="" width="76" align="right">
+
 # Cortex
 
 **A local memory and project-ops layer for coding agents.**

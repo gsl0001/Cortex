@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96" role="img" aria-label="Cortex">
+  <rect width="96" height="96" rx="20" fill="#21262C"/>
+  <!-- sessions stack up as plates, each one fainter; the top is the one you are in -->
+  <g fill="none" stroke-width="4.5" stroke-linejoin="round">
+    <path d="M21 66 L48 53 L75 66 L48 79 Z" stroke="#474F59"/>
+    <path d="M21 50 L48 37 L75 50 L48 63 Z" stroke="#6B747E"/>
+  </g>
+  <path d="M21 34 L48 21 L75 34 L48 47 Z" fill="#C89B3C"/>
+</svg>
