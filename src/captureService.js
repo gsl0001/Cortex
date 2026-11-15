@@ -359,6 +359,8 @@ function recordCitations(storage, candidate) {
       const quarantined = storage.quarantineRecordByPrefix(candidate.projectPath, idPrefix);
       storage.recordMetric("recall_contradicted", candidate.projectPath, {
         agent: candidate.agent, idPrefix, reason, quarantined,
+        // recall economics attributes the correction to the session that made it
+        sessionId: candidate.sessionId || null,
       });
     }
     const cited = [...new Set(

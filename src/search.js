@@ -41,14 +41,22 @@ export function searchMemory(storage, {
   const ftsQuery = [...new Set(terms)].map((term) => `"${term.replaceAll('"', '""')}"`).join(" OR ");
   // A long record is several chunk rows; keep its best-ranked chunk so the excerpt served is
   // the part that matched (and fits the pack budget), not the whole body.
-  const seen = new Set();
+  // The best chunk is picked per record BEFORE the candidate limit: limiting chunk rows first
+  // let one very long record fill the window and starve every other matching record.
   const rows = storage.db.prepare(`
-    SELECT record_id AS id, record_type AS recordType, bm25(search_chunks) AS rank,
-      project_path AS projectPath, title, body, tags
-    FROM search_chunks
-    WHERE search_chunks MATCH ?
-    ORDER BY rank LIMIT 300
-  `).all(ftsQuery).filter((row) => !seen.has(row.id) && seen.add(row.id)).slice(0, 100);
+    WITH matched AS MATERIALIZED (
+      SELECT rowid AS chunkRow, record_id AS id, bm25(search_chunks) AS rank
+      FROM search_chunks WHERE search_chunks MATCH ?
+    ), best AS (
+      SELECT chunkRow, id, rank, ROW_NUMBER() OVER (PARTITION BY id ORDER BY rank, chunkRow) AS position
+      FROM matched
+    )
+    SELECT best.id, chunk.record_type AS recordType, best.rank,
+      chunk.project_path AS projectPath, chunk.title, chunk.body, chunk.tags
+    FROM best JOIN search_chunks AS chunk ON chunk.rowid = best.chunkRow
+    WHERE best.position = 1
+    ORDER BY best.rank, best.id LIMIT 100
+  `).all(ftsQuery);
   const supersededIds = includeSuperseded ? new Set() : new Set(
     storage.db.prepare("SELECT supersedes_id AS id FROM fix_entries WHERE supersedes_id IS NOT NULL")
       .all().map((row) => row.id),

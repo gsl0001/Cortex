@@ -134,6 +134,18 @@ test("computeRecallEconomics: per-session verdicts, project rollup, cross-projec
     assert.equal(rescoped.sessions.some((row) => row.sessionId === "beta-hit"), false);
     assert.equal(rescoped.totals.hit, 1);
 
+    // the reciprocal case: a beta session cites an ALPHA-owned record, so the citation is
+    // stored under alpha. It is still beta's session and must not become an alpha hit.
+    s.insertSession({ id: "beta-cites-alpha", projectPath: beta, agent: "claude-code", source: "t", goal: "beta again", dirtyFiles: [], status: "finished" });
+    s.recordMetric("recall_injected", beta, { sessionId: "beta-cites-alpha", usedTokens: 300, maxTokens: 600, injectedFixIds: ["a1"], gated: false });
+    s.recordMetric("recall_cited", alpha, { sessionId: "beta-cites-alpha", idPrefix: "a1a1a1", resolved: true, source: "brief" });
+    const reciprocal = computeRecallEconomics(hub.storage, { projectPath: alpha });
+    assert.equal(reciprocal.sessions.some((row) => row.sessionId === "beta-cites-alpha"), false);
+    assert.equal(reciprocal.totals.hit, 1);
+    // unscoped, the session is credited where it ran
+    const everywhere = computeRecallEconomics(hub.storage, {});
+    assert.equal(everywhere.sessions.find((row) => row.sessionId === "beta-cites-alpha").projectPath, hub.storage.listProjectProfiles().find((p) => p.name === "Beta").projectPath);
+
     // file-overlap usefulness credits its session: by its own session id, or, for rows
     // written before that was recorded, through the injection metric it points at
     s.insertSession({ id: "useful-new", projectPath: alpha, agent: "claude-code", source: "t", goal: "fix x", dirtyFiles: [], status: "finished" });

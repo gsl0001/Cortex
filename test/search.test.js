@@ -153,3 +153,17 @@ test("a long record is indexed as chunks and search serves the matching chunk as
     assert.equal(hub.storage.countEmbeddings(), 0);
   });
 });
+
+test("one very long record cannot starve other matching records out of the candidate window", async () => {
+  await withSearchHub(async (hub, projectPath) => {
+    // several hundred chunks, every one of them matching the query term
+    const finding = "The exporter retried the upload after a timeout and logged the attempt. ".repeat(6000);
+    const long = hub.addResearchEntry({ projectPath, agent: "test", question: "Exporter log review", finding, sources: [] });
+    const fix = hub.addFixEntry({ projectPath, agent: "test", summary: "Exporter upload timeout raised to 30s", verification: "npm test passed" });
+    drainIndexJobs(hub.storage);
+    const chunks = hub.storage.db.prepare("SELECT COUNT(*) AS n FROM search_chunks WHERE record_id = ?").get(long.id).n;
+    assert.ok(chunks > 300, `expected more chunks than the old row limit, got ${chunks}`);
+    const ids = searchMemory(hub.storage, { projectPath, query: "exporter upload timeout" }).results.map((r) => r.id);
+    assert.deepEqual(new Set(ids), new Set([long.id, fix.id]));
+  });
+});

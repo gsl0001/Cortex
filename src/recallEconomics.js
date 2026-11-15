@@ -146,7 +146,7 @@ export function computeRecallEconomics(storage, { projectPath = null, since, ses
     ? db.prepare(`
         SELECT project_path AS projectPath, kind, payload_json AS payloadJson, created_at AS createdAt
         FROM metrics_events WHERE kind = 'recall_cited' AND created_at >= ? AND project_path != ?
-      `).all(sinceIso, scope).map((row) => ({ ...row, foreign: true }))
+      `).all(sinceIso, scope)
     : [];
 
   const sessionRows = db.prepare(`
@@ -168,6 +168,8 @@ export function computeRecallEconomics(storage, { projectPath = null, since, ses
   const recordSessions = new Map(); // record id -> Set(session id) it was served to
   const citedPrefixes = new Set();
   const injectionSession = new Map(); // recall_injected metric id -> session id
+  // where a session ran, whatever the window: a session older than `since` can still cite
+  const sessionOwner = { get: (id) => db.prepare("SELECT project_path AS projectPath FROM agent_sessions WHERE id = ?").get(id) };
   const isFatigued = (id) => (recordSessions.get(id)?.size || 0) >= FATIGUE_SESSIONS && !citedPrefixes.has(String(id).replace(/-/g, "").slice(0, 6));
   const bumpUnkeyed = (project, tokens) => {
     const entry = unkeyed.get(project) || { count: 0, tokens: 0 };
@@ -182,12 +184,15 @@ export function computeRecallEconomics(storage, { projectPath = null, since, ses
     if (row.kind === "recall_injected" && !sessionId) { bumpUnkeyed(row.projectPath, Number(payload.usedTokens || 0)); continue; }
     if (!sessionId) continue;
     if (row.kind === "recall_injected") injectionSession.set(row.id, sessionId);
-    // a citation credited to another project only counts here if this scope's session made it
-    if (row.foreign && !sessions.has(sessionId)) continue;
-    // a citation credited to another project belongs to the session that made it; the session's
-    // own project is what it was working in, which the session row (or the serving event) knows
-    const s = sessionFor(sessionId, row.kind === "recall_cited" && sessions.has(sessionId)
-      ? sessions.get(sessionId).projectPath : row.projectPath);
+    // A citation is stored under the CITED record's project, which says nothing about where
+    // the citing session ran. A session not seen yet is placed by its own row; in a scoped
+    // report a citation whose session cannot be placed in the scope is someone else's.
+    let project = sessions.get(sessionId)?.projectPath;
+    if (!project && row.kind === "recall_cited") {
+      project = sessionOwner.get(sessionId)?.projectPath;
+      if (scope && project !== scope) continue;
+    }
+    const s = sessionFor(sessionId, project || row.projectPath);
     if (!s.agent && payload.agent) s.agent = payload.agent;
     if (!s.startedAt) s.startedAt = row.createdAt;
     switch (row.kind) {
