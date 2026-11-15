@@ -41,9 +41,13 @@ function linkSimilarRecords(storage, job, content, embeddingProvider, threshold)
     "SELECT entity_id AS id FROM record_entities WHERE record_id = ? AND role = 'subject'",
   ).get(job.recordId);
   if (!subject) return;
+  // One row per record (its first chunk), so the cap counts records: capping chunk rows let a
+  // single long record fill the window and hide every older record from similarity linking.
   for (const candidate of storage.db.prepare(`
     SELECT record_id AS id, title, body FROM search_chunks
-    WHERE project_path = ? AND record_id != ?
+    WHERE rowid IN (
+      SELECT MIN(rowid) FROM search_chunks WHERE project_path = ? AND record_id != ? GROUP BY record_id
+    )
     ORDER BY rowid DESC LIMIT ?
   `).all(content.record.projectPath, job.recordId, SIMILARITY_CANDIDATE_CAP)) {
     const confidence = embeddingProvider.similarity(
