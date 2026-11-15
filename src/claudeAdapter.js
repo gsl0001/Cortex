@@ -346,11 +346,15 @@ export async function createClaudeHookContext(hub, hookInput = {}) {
   try {
     // injectedFilesChanged backs the recall_useful metric (captureService.js): when a fix
     // lands soon after touching one of these files, the recall that surfaced it "worked".
-    const injectedFilesChanged = [...new Set((brief.fixes || []).flatMap((f) => f.filesChanged || []))];
+    // Everything recorded here describes what the session SAW: the records whose marker made it
+    // into the rendered brief (brief.served), not the ranked candidates the packer cut for budget.
+    // Counting a cut record as injected marked unseen records as served and fatigued.
+    const served = brief.served || { fixes: brief.fixes || [], research: brief.research || [], decisions: brief.decisions || [] };
+    const injectedFilesChanged = [...new Set(served.fixes.flatMap((f) => f.filesChanged || []))];
     // Age of what was served, in days, one entry per record. The economics rollup reads
     // "old context vs new" off this: a brief that keeps serving 90-day-old fixes that never
     // get cited is a different problem from one serving last week's work.
-    const servedAgeDays = [...(brief.fixes || []), ...(brief.research || []), ...(brief.decisions || [])]
+    const servedAgeDays = [...served.fixes, ...served.research, ...served.decisions]
       .map((r) => Math.round((Date.now() - Date.parse(r.createdAt)) / 86_400_000))
       .filter((days) => Number.isFinite(days))
       .map((days) => Math.max(0, days));
@@ -366,19 +370,19 @@ export async function createClaudeHookContext(hub, hookInput = {}) {
       usedTokens: brief.usedTokens ?? 0,
       maxTokens: brief.maxTokens ?? 0,
       dropped: brief.dropped ?? 0,
-      injectedFixIds: (brief.fixes || []).map((f) => f.id),
+      injectedFixIds: served.fixes.map((f) => f.id),
       // Research and decision slots were never recorded (value audit IV), so no scope or
       // repetition claim about them was checkable — the audit's own "0% foreign payload" number
       // covered fix slots only, roughly half the records a brief actually serves. Record all
       // three, and how many records topic scoping declined to serve.
-      injectedResearchIds: (brief.research || []).map((r) => r.id),
-      injectedDecisionIds: (brief.decisions || []).map((d) => d.id),
+      injectedResearchIds: served.research.map((r) => r.id),
+      injectedDecisionIds: served.decisions.map((d) => d.id),
       offTopicFiltered: brief.offTopicFiltered ?? 0,
       injectedFilesChanged,
       // per-record file lists so recall_useful can attribute a later fix to ONE recalled
       // record instead of firing on any overlap with this flat union (hot files are in
       // every brief, which made the union match meaningless)
-      injectedFixes: (brief.fixes || []).map((f) => ({ id: f.id, projectPath: f.projectPath ?? null, filesChanged: f.filesChanged || [] })),
+      injectedFixes: served.fixes.map((f) => ({ id: f.id, projectPath: f.projectPath ?? null, filesChanged: f.filesChanged || [] })),
     });
   } catch {
     // telemetry must never block recall

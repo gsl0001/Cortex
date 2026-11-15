@@ -250,6 +250,39 @@ test("sweep reaps active sessions past the TTL (crashed agents)", async () => {
   });
 });
 
+test("recall_injected lists only records the brief rendered, so a budget-cut record is not marked served", async () => {
+  await withProject(async ({ dir, hub }) => {
+    for (let i = 0; i < 12; i += 1) {
+      hub.addFixEntry({ projectPath: dir, agent: "claude-code", summary: `Close fill reconciliation pass ${i} repaired the watcher retry path for venue ${i}`, filesChanged: [`src/venue${i}.js`], verification: "npm test passed" });
+    }
+    // Sweep the budget from "no room for any fix" to "room for all": at every step the metric
+    // must list exactly the fixes whose marker is in the brief, and the count must grow through
+    // partial serves rather than jump from none to all.
+    const servedCounts = [];
+    for (let budget = 200; budget <= 700; budget += 25) {
+      const sessionId = `sess-${budget}`;
+      hub.storage.setSetting("brief.maxTokens", budget);
+      // the first prompt of an open session becomes its goal, which is what un-gates memory
+      await createClaudeHookContext(hub, { hook_event_name: "SessionStart", cwd: dir, session_id: sessionId });
+      const result = await createClaudeHookContext(hub, { hook_event_name: "UserPromptSubmit", cwd: dir, session_id: sessionId, prompt: "repair the close fill watcher retry path" });
+      const text = result.hookSpecificOutput.additionalContext;
+      const event = hub.storage.listMetrics(dir, { kind: "recall_injected", limit: 100 })
+        .find((m) => m.payload.sessionId === sessionId && m.payload.eventName === "UserPromptSubmit");
+      const ids = event.payload.injectedFixIds;
+      const rendered = hub.storage.listFixes(dir, { limit: 50 }).filter((f) => text.includes(`[m:${f.id.replace(/-/g, "").slice(0, 6)}]`)).map((f) => f.id);
+      assert.deepEqual([...ids].sort(), rendered.sort(), `budget ${budget}: recorded ids must be the rendered ones`);
+      assert.equal(event.payload.servedAgeDays.length, ids.length);
+      assert.deepEqual(event.payload.injectedFixes.map((f) => f.id), ids);
+      // and the report counts what was seen
+      assert.equal(hub.recallEconomics({}).sessions.find((s) => s.sessionId === sessionId).servedRecords, ids.length);
+      servedCounts.push(ids.length);
+    }
+    const most = Math.max(...servedCounts);
+    assert.equal(servedCounts[0], 0, "the tightest budget renders no fix, and records none");
+    assert.ok(most > 1 && servedCounts.some((n) => n > 0 && n < most), `expected a partial serve in ${servedCounts.join(",")}`);
+  });
+});
+
 test("recall records a recall_injected metric with token usage and agent", async () => {
   await withProject(async ({ dir, hub }) => {
     await createClaudeHookContext(hub, { cwd: dir });

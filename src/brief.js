@@ -156,11 +156,15 @@ export function buildProjectBrief({
     : "No prior memory matched this session; use memory_search to look." });
 
   const packed = packBrief(sections, { maxTokens, fieldChars });
+  // The ranked lists are candidates; the packer drops what does not fit the budget. A record
+  // was served only if its [m:id] marker made it into the rendered text.
+  const rendered = (records) => records.filter((record) => packed.contentText.includes(mid(record)));
 
   return {
     projectPath, nextCommand, profile,
     tasks: activeTasks, blockedTasks, sessions,
     research: relevantResearch, fixes: relevantFixes, decisions: relevantDecisions,
+    served: { research: rendered(relevantResearch), fixes: rendered(relevantFixes), decisions: rendered(relevantDecisions) },
     text: packed.text, contentText: packed.contentText,
     usedTokens: packed.usedTokens, maxTokens: packed.maxTokens, dropped: packed.dropped,
   };
