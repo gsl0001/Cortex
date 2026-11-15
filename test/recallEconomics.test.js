@@ -125,6 +125,28 @@ test("computeRecallEconomics: per-session verdicts, project rollup, cross-projec
     assert.equal(scoped.projects.length, 1);
     assert.equal(scoped.sessions.find((row) => row.sessionId === "hit").verdict, "hit");
 
+    // a citation made by another project's session must not leak into this scope
+    s.insertSession({ id: "beta-hit", projectPath: beta, agent: "claude-code", source: "t", goal: "beta work", dirtyFiles: [], status: "finished" });
+    s.recordMetric("recall_injected", beta, { sessionId: "beta-hit", usedTokens: 300, maxTokens: 600, injectedFixIds: [fixId], gated: false });
+    s.recordMetric("recall_cited", beta, { sessionId: "beta-hit", idPrefix: "abcdef", resolved: true, source: "brief" });
+    const rescoped = computeRecallEconomics(hub.storage, { projectPath: alpha });
+    assert.deepEqual(rescoped.projects.map((p) => p.name), ["Alpha"]);
+    assert.equal(rescoped.sessions.some((row) => row.sessionId === "beta-hit"), false);
+    assert.equal(rescoped.totals.hit, 1);
+
+    // file-overlap usefulness credits its session: by its own session id, or, for rows
+    // written before that was recorded, through the injection metric it points at
+    s.insertSession({ id: "useful-new", projectPath: alpha, agent: "claude-code", source: "t", goal: "fix x", dirtyFiles: [], status: "finished" });
+    s.recordMetric("recall_injected", alpha, { sessionId: "useful-new", usedTokens: 100, maxTokens: 600, injectedFixIds: [fixId], gated: false });
+    s.recordMetric("recall_useful", alpha, { sessionId: "useful-new", fixId: "n" });
+    s.insertSession({ id: "useful-old", projectPath: alpha, agent: "claude-code", source: "t", goal: "fix y", dirtyFiles: [], status: "finished" });
+    s.recordMetric("recall_injected", alpha, { sessionId: "useful-old", usedTokens: 100, maxTokens: 600, injectedFixIds: [fixId], gated: false });
+    const injection = s.listMetrics(alpha, { kind: "recall_injected", limit: 1 })[0];
+    s.recordMetric("recall_useful", alpha, { fixId: "o", recallMetricId: injection.id });
+    const useful = Object.fromEntries(computeRecallEconomics(hub.storage, {}).sessions.map((row) => [row.sessionId, row]));
+    assert.equal(useful["useful-new"].verdict, "hit");
+    assert.equal(useful["useful-old"].verdict, "hit");
+
     const text = renderRecallEconomicsText(report);
     assert.match(text, /Sessions 4: hit 1 · cold 1 · thrash 1/);
     assert.match(text, /Alpha\s+4\s+1\s+1\s+1\s+0\s+50%/);

@@ -137,7 +137,11 @@ function recordRecallUsefulness(storage, projectPath, agent, fixId, filesChanged
       ? matchedFixIds.length === 1
       : matchedFiles.length <= RECALL_USEFUL_MAX_FILES;
     if (!narrow) return;
-    storage.recordMetric("recall_useful", projectPath, { agent, fixId, matchedFiles, matchedFixIds, recallMetricId: recent.id });
+    storage.recordMetric("recall_useful", projectPath, {
+      agent, fixId, matchedFiles, matchedFixIds, recallMetricId: recent.id,
+      // the session the brief was served to, so recall economics can credit it
+      sessionId: recent.payload.sessionId || null,
+    });
   } catch {
     // telemetry must never block capture
   }

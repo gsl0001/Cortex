@@ -144,6 +144,26 @@ test("consolidate writes proposal files and never touches the target file", asyn
   });
 });
 
+test("two repos with the same basename get separate proposal files", async () => {
+  await withHub(async ({ hub, dir, skillsDir, out }) => {
+    const a = join(dir, "client-a", "repo");
+    const b = join(dir, "client-b", "repo");
+    await mkdir(a, { recursive: true });
+    await mkdir(b, { recursive: true });
+    for (const project of [a, b]) {
+      const first = decision(hub, project, RULE, daysAgo(6));
+      decision(hub, project, `${RULE} again`, daysAgo(2), first);
+    }
+    const result = await consolidate(hub, { since: "7d", skillsDir, outDir: out });
+    assert.equal(result.targets.length, 2);
+    assert.equal(new Set(result.targets.map((t) => t.file)).size, 2);
+    const files = (await readdir(result.outDir)).filter((name) => name !== "README.md");
+    assert.equal(files.length, 2);
+    assert.ok(files.includes("repo.md"));
+    assert.ok(files.some((name) => /^repo-[0-9a-f]{6}\.md$/.test(name)));
+  });
+});
+
 function fakeModel(output, code = 0) {
   const prompts = [];
   const spawnImpl = () => {

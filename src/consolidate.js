@@ -7,6 +7,7 @@
 // Recurrence is counted in distinct DAYS, from three signals: a record restated (its
 // supersede chain), captured again (a duplicate capture pointing at it), or cited in a
 // session. A one-off fix appears on one day and is not a candidate.
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -259,6 +260,7 @@ export async function consolidate(hub, { outDir, draft = false, spawnImpl, model
   const dir = join(outDir || join(dirname(hub.storage.dbPath), "proposals"), day(now.toISOString()));
   mkdirSync(dir, { recursive: true });
   const written = [];
+  const usedNames = new Set();
   for (const entry of mined.targets) {
     let drafted = null;
     if (draft) {
@@ -267,7 +269,12 @@ export async function consolidate(hub, { outDir, draft = false, spawnImpl, model
       });
       drafted = output === null ? { error: "the model call failed (check `claude -p` auth)" } : parseDraft(output);
     }
-    const file = join(dir, `${entry.target.key.replace(/[^a-z0-9._-]+/gi, "-")}.md`);
+    // Two repos can share a basename; a later one gets a hash of its target path so it
+    // cannot overwrite the first proposal.
+    let name = entry.target.key.replace(/[^a-z0-9._-]+/gi, "-");
+    if (usedNames.has(name.toLowerCase())) name += `-${createHash("sha1").update(entry.target.path).digest("hex").slice(0, 6)}`;
+    usedNames.add(name.toLowerCase());
+    const file = join(dir, `${name}.md`);
     writeFileSync(file, renderProposal(entry, { ...mined, draft: drafted }));
     written.push({ file, target: entry.target.path, candidates: entry.candidates.length, outdated: entry.outdated.length,
       alreadyDocumented: entry.alreadyDocumented, drafted: drafted ? (drafted.error ? "failed" : drafted.add.length) : null });
