@@ -89,9 +89,12 @@ export class OllamaEmbeddingProvider {
     this.queryVec = null;
     try {
       const [vector] = await this.embed([String(query || "")], { prefix: "search_query: ", timeoutMs: 2000 });
-      // ponytail: reload the whole doc-vector cache when the row count changes — vectors are
-      // immutable per record_id, and 2k rows load in single-digit ms. Revisit if the corpus 10x's.
-      if (this.storage.countEmbeddings() !== this.docVecs.size) {
+      // ponytail: reload the whole doc-vector cache when the stored set changes; 2k rows load
+      // in single-digit ms. Keyed on a version, not the row count: re-indexing changed text
+      // replaces a record's vectors without changing how many there are.
+      const version = this.storage.embeddingVersion();
+      if (version !== this.docVecsVersion) {
+        this.docVecsVersion = version;
         // keyed by vector key ("<id>" for chunk 0, "<id>#<n>" for later chunks; chunk.js)
         this.docVecs = new Map(this.storage.allEmbeddings().map(({ recordId, vector: blob }) => [recordId, blobToFloat32(blob)]));
         this.recordVecs = new Map();

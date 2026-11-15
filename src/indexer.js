@@ -41,19 +41,25 @@ function linkSimilarRecords(storage, job, content, embeddingProvider, threshold)
     "SELECT entity_id AS id FROM record_entities WHERE record_id = ? AND role = 'subject'",
   ).get(job.recordId);
   if (!subject) return;
-  // One row per record (its first chunk), so the cap counts records: capping chunk rows let a
-  // single long record fill the window and hide every older record from similarity linking.
-  for (const candidate of storage.db.prepare(`
+  // The cap counts records, not chunk rows: capping rows let a single long record fill the
+  // window and hide every older record. A candidate scores as its best chunk, so related
+  // material anywhere in a long record still links it.
+  const best = new Map(); // record id -> highest similarity across its chunks
+  for (const chunk of storage.db.prepare(`
     SELECT record_id AS id, title, body FROM search_chunks
-    WHERE rowid IN (
-      SELECT MIN(rowid) FROM search_chunks WHERE project_path = ? AND record_id != ? GROUP BY record_id
+    WHERE record_id IN (
+      SELECT record_id FROM search_chunks WHERE project_path = ? AND record_id != ?
+      GROUP BY record_id ORDER BY MIN(rowid) DESC LIMIT ?
     )
-    ORDER BY rowid DESC LIMIT ?
   `).all(content.record.projectPath, job.recordId, SIMILARITY_CANDIDATE_CAP)) {
     const confidence = embeddingProvider.similarity(
       `${content.title} ${content.body}`,
-      `${candidate.title} ${candidate.body}`,
+      `${chunk.title} ${chunk.body}`,
     );
+    if (confidence > (best.get(chunk.id) ?? -1)) best.set(chunk.id, confidence);
+  }
+  for (const [candidateId, confidence] of best) {
+    const candidate = { id: candidateId };
     if (confidence < threshold) continue;
     const target = storage.db.prepare(
       "SELECT entity_id AS id FROM record_entities WHERE record_id = ? AND role = 'subject'",

@@ -386,6 +386,13 @@ export class CortexStorage {
     return this.db.prepare("SELECT COUNT(*) AS count FROM embedding_vectors").get().count;
   }
 
+  // Changes whenever the stored vectors do. Count and newest timestamp catch writes from any
+  // process; the in-process counter catches a replacement inside the same millisecond.
+  embeddingVersion() {
+    const row = this.db.prepare("SELECT COUNT(*) AS n, MAX(created_at) AS latest FROM embedding_vectors").get();
+    return `${row.n}|${row.latest || ""}|${this.embeddingWrites || 0}`;
+  }
+
   allEmbeddings() {
     return this.db.prepare("SELECT record_id AS recordId, vector FROM embedding_vectors").all();
   }
@@ -393,6 +400,7 @@ export class CortexStorage {
   putEmbedding(recordId, model, vectorBlob) {
     this.db.prepare("INSERT OR REPLACE INTO embedding_vectors(record_id, model, vector, created_at) VALUES (?, ?, ?, ?)")
       .run(recordId, model, vectorBlob, nowIso());
+    this.embeddingWrites = (this.embeddingWrites || 0) + 1;
   }
 
   // One row per (record, chunk) that has no vector. chunkIndex is the chunk's position within
