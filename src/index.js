@@ -1,5 +1,6 @@
 export { createCortex, Cortex } from "./commands.js";
 export { computeStats } from "./stats.js";
+export { computeRecallEconomics, renderRecallEconomicsText, classifySession } from "./recallEconomics.js";
 export {
   buildPortfolioDoctor,
   formatPortfolioDoctor,

@@ -911,3 +911,22 @@ input.cc-num { width: 64px; min-height: 34px; padding: 0 8px; border: 1px solid 
   .portfolio-header select { width: 100%; }
   .portfolio-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* Recall economics (Health & audit): portfolio rollup + per-project session table. */
+.econ h2 small { margin-left: 8px; color: var(--dim); font-size: .7rem; font-weight: 500; }
+.econ h3 { margin: 18px 0 8px; font-size: .9rem; }
+.econ-lede { margin: 4px 0 12px; color: var(--muted); font-size: .78rem; line-height: 1.5; }
+.econ-lede b { color: var(--text); }
+.econ .cards { margin-bottom: 12px; }
+.econ .card.metric-attention { border-color: var(--warning); }
+.econ .card.metric-attention h2 { color: var(--warning); }
+.econ-table { min-width: 960px; }
+.econ-table td { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.econ-table td:first-child, .econ-table td:nth-child(3) { white-space: normal; }
+.econ-row-attention td { background: color-mix(in srgb, var(--warning) 8%, transparent); }
+.econ-unregistered { margin: 8px 0 0; color: var(--dim); font-size: .7rem; }
+.econ-verdict { display: inline-block; padding: 1px 7px; border-radius: 5px; font-size: .66rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; background: var(--surface-raised); color: var(--muted); }
+.econ-hit { background: color-mix(in srgb, var(--success) 18%, transparent); color: var(--success); }
+.econ-thrash { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+.econ-quiet { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
+.econ-cold { background: var(--accent-soft); color: var(--accent); }

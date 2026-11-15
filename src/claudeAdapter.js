@@ -29,14 +29,53 @@ export function gitChangedFiles(projectPath) {
 
 // ponytail: Stop hook payload gives transcript_path (JSONL), not the message text.
 // Read the last assistant turn from it so live capture isn't always empty.
-export function lastAssistantText(transcriptPath) {
-  if (!transcriptPath) return "";
-  let lines;
+function transcriptLines(transcriptPath) {
+  if (!transcriptPath) return null;
   try {
-    lines = readFileSync(transcriptPath, "utf8").trim().split("\n");
+    return readFileSync(transcriptPath, "utf8").trim().split("\n");
   } catch {
-    return "";
+    return null;
   }
+}
+
+// Session token burn, read from the Claude Code transcript the Stop hook already hands us.
+// The hooks can't see the model's bill any other way; this is the denominator that makes
+// "hub tokens injected" comparable to "context the session actually processed". Claude Code
+// writes one JSONL entry per content block, all sharing the API message id and its usage —
+// dedupe on that id or every tool-using turn counts 2-3×. Returns null when the transcript
+// carries no usage (other agents' formats), so callers record nothing rather than zeros.
+export function transcriptUsage(transcriptPath) {
+  const lines = transcriptLines(transcriptPath);
+  if (!lines) return null;
+  const seen = new Set();
+  const totals = { turns: 0, inputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, outputTokens: 0 };
+  for (const line of lines) {
+    let entry;
+    try { entry = JSON.parse(line); } catch { continue; }
+    if (entry?.type !== "assistant") continue;
+    const usage = entry.message?.usage;
+    if (!usage || typeof usage !== "object") continue;
+    const messageId = entry.message?.id;
+    if (messageId) {
+      if (seen.has(messageId)) continue;
+      seen.add(messageId);
+    }
+    totals.turns += 1;
+    totals.inputTokens += Number(usage.input_tokens || 0);
+    totals.cacheReadTokens += Number(usage.cache_read_input_tokens || 0);
+    totals.cacheCreationTokens += Number(usage.cache_creation_input_tokens || 0);
+    totals.outputTokens += Number(usage.output_tokens || 0);
+  }
+  if (!totals.turns) return null;
+  // Every input token the model processed, cached or not — the size of the context the
+  // session paid attention to, summed over turns. Cache reads are cheaper, not free.
+  totals.contextTokens = totals.inputTokens + totals.cacheReadTokens + totals.cacheCreationTokens;
+  return totals;
+}
+
+export function lastAssistantText(transcriptPath) {
+  const lines = transcriptLines(transcriptPath);
+  if (!lines) return "";
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     let entry;
     try { entry = JSON.parse(lines[i]); } catch { continue; }
@@ -158,6 +197,16 @@ export async function createClaudeHookContext(hub, hookInput = {}) {
   // unregistered directories (the home folder, scratch dirs) — a full project brief there is
   // pure context pollution at ~740 tokens a shot. One discoverable line instead.
   if (!hub.storage.getProjectProfile(projectPath)) {
+    // Sessions that spin up outside any registered project were invisible: no brief, no
+    // metric, nothing to count against the sessions that do pull from memory. One row per
+    // SessionStart (not per prompt) under the machine bucket keeps it cheap and countable.
+    if (eventName === "SessionStart") {
+      try {
+        hub.storage.recordMetric("recall_unregistered", "machine", {
+          sessionId: hookInput.session_id || null, cwd: projectPath, agent: resolveAgent(hookInput.agent_type),
+        });
+      } catch { /* telemetry only */ }
+    }
     return {
       hookSpecificOutput: {
         hookEventName: eventName,
@@ -298,7 +347,17 @@ export async function createClaudeHookContext(hub, hookInput = {}) {
     // injectedFilesChanged backs the recall_useful metric (captureService.js): when a fix
     // lands soon after touching one of these files, the recall that surfaced it "worked".
     const injectedFilesChanged = [...new Set((brief.fixes || []).flatMap((f) => f.filesChanged || []))];
+    // Age of what was served, in days, one entry per record. The economics rollup reads
+    // "old context vs new" off this: a brief that keeps serving 90-day-old fixes that never
+    // get cited is a different problem from one serving last week's work.
+    const servedAgeDays = [...(brief.fixes || []), ...(brief.research || []), ...(brief.decisions || [])]
+      .map((r) => Math.round((Date.now() - Date.parse(r.createdAt)) / 86_400_000))
+      .filter((days) => Number.isFinite(days))
+      .map((days) => Math.max(0, days));
     hub.storage.recordMetric("recall_injected", projectPath, {
+      // cold path: the relevance gate withheld project memory (brief.js)
+      gated: Boolean(brief.gated),
+      servedAgeDays,
       agent: resolveAgent(hookInput.agent_type),
       sessionId: hookInput.session_id || null,
       // SessionStart vs UserPromptSubmit costs were previously inseparable in the metrics
@@ -353,6 +412,16 @@ export async function flushClaudeStop(hub, hookInput = {}, { client = createWrit
   // the final assistant text as the session outcome.
   if (hookInput.session_id) {
     try { hub.storage.finishSession(hookInput.session_id, { outcome: truncate(message, 240) || null }); } catch { /* no open session — fine */ }
+    // Stop fires per assistant turn, so this is one row per turn; the economics rollup keeps
+    // the latest row per session (the running total). Skipped when the transcript has no usage.
+    try {
+      const usage = transcriptUsage(hookInput.transcript_path);
+      if (usage) {
+        hub.storage.recordMetric("session_usage", flushProject, {
+          sessionId: hookInput.session_id, agent: resolveAgent(hookInput.agent_type), ...usage,
+        });
+      }
+    } catch { /* telemetry only */ }
   }
   const candidate = {
     projectPath: hookInput.cwd || process.cwd(),

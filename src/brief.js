@@ -85,6 +85,9 @@ export function buildProjectBrief({
       research: [], fixes: [], decisions: [],
       text: packed.text, contentText: packed.contentText,
       usedTokens: packed.usedTokens, maxTokens: packed.maxTokens, dropped: packed.dropped,
+      // The relevance gate withheld project memory. Recorded on recall_injected so the
+      // economics rollup can tell "cold: nothing served" from "warm: served, never used".
+      gated: true,
     };
   }
   const relevantResearch = rankResearch(research, context, semantic);

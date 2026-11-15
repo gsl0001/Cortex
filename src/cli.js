@@ -92,6 +92,9 @@ function usage() {
   cortex index rebuild
   cortex brief --project .
   cortex stats --project . --json
+  cortex recall-economics [--project . | --all] [--since 14d] [--sessions 50] [--json]
+  cortex consolidate [--project .] [--since 7d] [--min-days 2] [--limit 8] [--out dir] [--draft]
+    (writes proposal files only; --draft asks claude -p to phrase the rules)
   cortex eod [--date 2026-08-07] [--json] [--html reports/eod/2026-08-07.html] [--notify] [--digest]
   cortex maintenance sweep
   cortex maintenance dedupe-decisions [--project .] [--apply]   (dry-run without --apply)
@@ -291,6 +294,27 @@ export async function runCli(argv = process.argv.slice(2)) {
       result = flags.json ? report : { text: renderEodText(report) };
     } else if (resource === "stats") {
       result = hub.stats({ projectPath: flags.project || process.cwd(), since: flags.since });
+    } else if (resource === "recall-economics") {
+      // --all (or no --project) = portfolio view; --project scopes to one project
+      const { renderRecallEconomicsText } = await import("./recallEconomics.js");
+      const report = hub.recallEconomics({
+        projectPath: flags.all ? null : (flags.project || null),
+        since: flags.since,
+        sessionLimit: flags.sessions ? Number(flags.sessions) : undefined,
+      });
+      result = flags.json ? report : { text: renderRecallEconomicsText(report) };
+    } else if (resource === "consolidate") {
+      const { consolidate } = await import("./consolidate.js");
+      result = await consolidate(hub, {
+        projectPath: flags.project || null,
+        since: flags.since || "7d",
+        minDays: flags["min-days"] ? Number(flags["min-days"]) : undefined,
+        limit: flags.limit ? Number(flags.limit) : undefined,
+        outDir: flags.out,
+        skillsDir: flags["skills-dir"],
+        draft: Boolean(flags.draft),
+        model: flags.model,
+      });
     } else if (resource === "maintenance" && action === "sweep") {
       result = hub.sweep();
     } else if (resource === "maintenance" && action === "dedupe-decisions") {

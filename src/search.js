@@ -39,13 +39,16 @@ export function searchMemory(storage, {
   if (!terms.length) return { results: [], diagnostics: { semanticAvailable: false, weights } };
   const normalizedProject = normalizeProjectPath(projectPath);
   const ftsQuery = [...new Set(terms)].map((term) => `"${term.replaceAll('"', '""')}"`).join(" OR ");
+  // A long record is several chunk rows; keep its best-ranked chunk so the excerpt served is
+  // the part that matched (and fits the pack budget), not the whole body.
+  const seen = new Set();
   const rows = storage.db.prepare(`
     SELECT record_id AS id, record_type AS recordType, bm25(search_chunks) AS rank,
       project_path AS projectPath, title, body, tags
     FROM search_chunks
     WHERE search_chunks MATCH ?
-    ORDER BY rank LIMIT 100
-  `).all(ftsQuery);
+    ORDER BY rank LIMIT 300
+  `).all(ftsQuery).filter((row) => !seen.has(row.id) && seen.add(row.id)).slice(0, 100);
   const supersededIds = includeSuperseded ? new Set() : new Set(
     storage.db.prepare("SELECT supersedes_id AS id FROM fix_entries WHERE supersedes_id IS NOT NULL")
       .all().map((row) => row.id),

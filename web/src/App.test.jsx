@@ -775,3 +775,45 @@ test("api sends stored bearer token", async () => {
     localStorage.removeItem("cortex_token");
   }
 });
+
+test("Health & audit renders the recall-economics tables: project rollup and the selected project's sessions", async () => {
+  const stats = { recallCount: 0, avgTokens: 0, tokensP95: 0, captureTotal: 0, captureByReason: {}, records: { fix: 0, research: 0 }, supersededFixes: 0 };
+  const economics = {
+    since: "2026-08-19T00:00:00.000Z", projectPath: null,
+    totals: { sessions: 3, hit: 1, cold: 1, thrash: 1, quiet: 0, silent: 0, tokensInjected: 1590, tokensOnHits: 400, tokensWasted: 1100, hitRatePct: 50, skipRatePct: 33, unregisteredStarts: 2 },
+    unregistered: [{ cwd: "C:/Users/me", count: 2 }],
+    projects: [
+      { projectPath: "C:/demo", name: "Demo", sessions: 3, hit: 1, cold: 1, thrash: 1, quiet: 0, silent: 0, hitRatePct: 50, tokensInjected: 1590, tokensWasted: 1100, skipRatePct: 33, medianServedAgeDays: 80, usage: { hubSharePct: 7.1 } },
+      { projectPath: "C:/other", name: "Other", sessions: 0, hit: 0, cold: 0, thrash: 0, quiet: 0, silent: 0, hitRatePct: null, tokensInjected: 200, tokensWasted: 0, skipRatePct: null, medianServedAgeDays: null, usage: { hubSharePct: null } },
+    ],
+    sessions: [
+      { sessionId: "s-hit", projectPath: "C:/demo", verdict: "hit", goal: "use the retry fix", startedAt: "2026-09-01T10:00:00Z", briefsInjected: 1, briefsSkipped: 2, briefsGated: 0, servedRecords: 3, tokensInjected: 400, cited: 1, citedUnserved: 0, medianServedAgeDays: 12, usage: { contextTokens: 9000 } },
+      { sessionId: "s-thrash", projectPath: "C:/demo", verdict: "thrash", goal: "ignore memory", startedAt: "2026-09-01T09:00:00Z", briefsInjected: 2, briefsSkipped: 0, briefsGated: 0, servedRecords: 4, tokensInjected: 1100, cited: 0, citedUnserved: 1, medianServedAgeDays: 88, usage: null },
+      { sessionId: "s-elsewhere", projectPath: "C:/other", verdict: "cold", goal: "not this project", startedAt: "2026-09-01T08:00:00Z", briefsInjected: 1, briefsSkipped: 0, briefsGated: 1, servedRecords: 0, tokensInjected: 90, cited: 0, citedUnserved: 0, medianServedAgeDays: null, usage: null },
+    ],
+  };
+  vi.stubGlobal("fetch", vi.fn().mockImplementation((path) => {
+    if (String(path).includes("/projects")) return Promise.resolve({ ok: true, json: async () => [{ projectPath: "C:/demo", name: "Demo" }, { projectPath: "C:/other", name: "Other" }] });
+    if (String(path).includes("/stats")) return Promise.resolve({ ok: true, json: async () => stats });
+    if (String(path).includes("/audit")) return Promise.resolve({ ok: true, json: async () => ({ issues: [] }) });
+    if (String(path).includes("/recall-economics")) return Promise.resolve({ ok: true, json: async () => economics });
+    return Promise.resolve({ ok: true, json: async () => [] });
+  }));
+  render(<App />);
+  const navigation = within(screen.getByRole("navigation", { name: "Primary" }));
+  fireEvent.click(navigation.getByRole("button", { name: "More" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Health & audit" }));
+
+  const rollup = within(await screen.findByRole("table", { name: "Recall economics by project" }));
+  expect(rollup.getByText("Demo")).toBeInTheDocument();
+  expect(rollup.getByText("1,100")).toBeInTheDocument(); // wasted tokens
+  expect(rollup.getByText("7.1%")).toBeInTheDocument(); // hub share of context
+  expect(screen.getByText(/2× C:\/Users\/me/)).toBeInTheDocument();
+
+  // sessions table is scoped to the selected project: the cold session from C:/other is not listed
+  const sessions = within(await screen.findByRole("table", { name: "Recent sessions for Demo" }));
+  expect(sessions.getByText("thrash")).toBeInTheDocument();
+  expect(sessions.getByText("use the retry fix")).toBeInTheDocument();
+  expect(sessions.queryByText("not this project")).not.toBeInTheDocument();
+  expect(sessions.getByText("0 (+1 unserved)")).toBeInTheDocument();
+});

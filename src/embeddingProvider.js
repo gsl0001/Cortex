@@ -1,3 +1,5 @@
+import { recordOfKey, vectorKey } from "./chunk.js";
+
 export class NullEmbeddingProvider {
   available() {
     return false;
@@ -90,7 +92,14 @@ export class OllamaEmbeddingProvider {
       // ponytail: reload the whole doc-vector cache when the row count changes — vectors are
       // immutable per record_id, and 2k rows load in single-digit ms. Revisit if the corpus 10x's.
       if (this.storage.countEmbeddings() !== this.docVecs.size) {
+        // keyed by vector key ("<id>" for chunk 0, "<id>#<n>" for later chunks; chunk.js)
         this.docVecs = new Map(this.storage.allEmbeddings().map(({ recordId, vector: blob }) => [recordId, blobToFloat32(blob)]));
+        this.recordVecs = new Map();
+        for (const [key, vec] of this.docVecs) {
+          const id = recordOfKey(key);
+          if (!this.recordVecs.has(id)) this.recordVecs.set(id, []);
+          this.recordVecs.get(id).push(vec);
+        }
       }
       this.queryKey = String(query || "");
       this.queryVec = vector;
@@ -99,10 +108,10 @@ export class OllamaEmbeddingProvider {
 
   similarity(query, text, recordId) {
     if (this.queryVec && this.queryKey === String(query || "")) {
-      const doc = this.docVecs.get(recordId);
-      // ponytail: clamped raw cosine; rows without a vector score on the MinHash scale for
-      // one sweep cycle (≤60s) until embedMissing catches them — not worth normalizing.
-      if (doc) return Math.max(0, cosine(this.queryVec, doc));
+      const docs = this.recordVecs?.get(recordId);
+      // ponytail: clamped raw cosine, best chunk wins; rows without a vector score on the
+      // MinHash scale for one sweep cycle (≤60s) until embedMissing catches them.
+      if (docs?.length) return Math.max(0, ...docs.map((vec) => cosine(this.queryVec, vec)));
     }
     return this.fallback.similarity(query, text);
   }
@@ -119,7 +128,7 @@ export class OllamaEmbeddingProvider {
         chunk.map((row) => `${row.title || ""} ${row.body || ""}`.slice(0, 1500)),
         { prefix: "search_document: ", timeoutMs: 120_000 },
       );
-      chunk.forEach((row, i) => this.storage.putEmbedding(row.recordId, this.model, float32ToBlob(vectors[i])));
+      chunk.forEach((row, i) => this.storage.putEmbedding(vectorKey(row.recordId, row.chunkIndex), this.model, float32ToBlob(vectors[i])));
       embedded += chunk.length;
     }
     return embedded;

@@ -71,7 +71,8 @@ export function parseDistilledRecords(output) {
     .slice(0, 3);
 }
 
-function runModel(prompt, { model, spawnImpl = spawn, timeoutMs = DISTILL_TIMEOUT_MS } = {}) {
+// Shared with the consolidation run (consolidate.js).
+export function runModel(prompt, { model, spawnImpl = spawn, timeoutMs = DISTILL_TIMEOUT_MS } = {}) {
   return new Promise((resolve) => {
     let child;
     try {

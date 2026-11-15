@@ -124,3 +124,32 @@ test("search includes cross-project matches with a same-project affinity advanta
     assert.ok(results.find((result) => result.id === remote.id).score < results[0].score);
   });
 });
+
+test("a long record is indexed as chunks and search serves the matching chunk as the excerpt", async () => {
+  await withSearchHub(async (hub, projectPath) => {
+    const filler = "The retrospective covered the release train and the on-call rotation. ".repeat(60);
+    const finding = `${filler}The flaky integration test was caused by the CI runner clock being set to UTC-12. ${filler}`;
+    const record = hub.addResearchEntry({ projectPath, agent: "test", question: "CI retrospective", finding, sources: [] });
+    drainIndexJobs(hub.storage);
+    const chunks = hub.storage.db.prepare("SELECT body FROM search_chunks WHERE record_id = ? ORDER BY rowid").all(record.id);
+    assert.ok(chunks.length > 3, `expected several chunks, got ${chunks.length}`);
+    assert.ok(chunks.every((row) => row.body.length <= 1200));
+    const [top] = searchMemory(hub.storage, { projectPath, query: "CI runner clock UTC-12" }).results;
+    assert.equal(top.id, record.id);
+    assert.match(top.excerpt, /UTC-12/);
+    assert.ok(top.excerpt.length <= 1200, "excerpt is the matched chunk, not the whole body");
+    // one search result per record even though several chunks match the filler words
+    const ids = searchMemory(hub.storage, { projectPath, query: "retrospective release train" }).results.map((r) => r.id);
+    assert.equal(ids.filter((id) => id === record.id).length, 1);
+    // the sweep asks for one vector per chunk, keyed "<id>#<n>" after chunk 0
+    const missing = hub.storage.missingEmbeddingChunks(50);
+    assert.deepEqual(missing.map((row) => row.chunkIndex), chunks.map((_, i) => i));
+    // re-indexing unchanged text keeps the vectors; orphan pruning understands chunk keys
+    hub.storage.putEmbedding(`${record.id}#2`, "m", Buffer.alloc(4));
+    hub.storage.pruneOrphanEmbeddings();
+    assert.equal(hub.storage.countEmbeddings(), 1);
+    hub.storage.db.prepare("DELETE FROM search_chunks WHERE record_id = ?").run(record.id);
+    hub.storage.pruneOrphanEmbeddings();
+    assert.equal(hub.storage.countEmbeddings(), 0);
+  });
+});

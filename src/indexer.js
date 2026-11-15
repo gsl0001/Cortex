@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { LocalMinHashEmbeddingProvider } from "./embeddingProvider.js";
+import { chunkText } from "./chunk.js";
 
 export function enqueueRecord(storage, recordId, recordType) {
   const timestamp = new Date().toISOString();
@@ -88,11 +89,20 @@ export function runNextIndexJob(storage, {
   storage.db.prepare("UPDATE index_jobs SET status = 'running', attempts = attempts + 1, updated_at = ? WHERE id = ?").run(timestamp, job.id);
   try {
     const content = recordContent(storage, job);
+    const previous = storage.db.prepare("SELECT title, body FROM search_chunks WHERE record_id = ? ORDER BY rowid").all(job.recordId);
+    const chunks = content ? chunkText(content.body) : [];
+    const unchanged = content && previous.length === chunks.length
+      && previous.every((row, i) => row.title === content.title && row.body === chunks[i]);
+    // changed text invalidates the record's vectors: "<id>" for chunk 0, "<id>#<n>" after it
+    if (!unchanged) {
+      storage.db.prepare("DELETE FROM embedding_vectors WHERE record_id = ? OR record_id LIKE ? || '#%'").run(job.recordId, job.recordId);
+    }
     storage.db.prepare("DELETE FROM search_chunks WHERE record_id = ?").run(job.recordId);
-    if (content) storage.db.prepare(`
+    const insert = storage.db.prepare(`
       INSERT INTO search_chunks (record_id, project_path, record_type, title, body, tags)
       VALUES (?, ?, ?, ?, ?, ?)
-    `).run(job.recordId, content.record.projectPath, job.recordType, content.title, content.body, content.tags);
+    `);
+    for (const body of chunks) insert.run(job.recordId, content.record.projectPath, job.recordType, content.title, body, content.tags);
     if (content) linkSimilarRecords(storage, job, content, embeddingProvider, similarityThreshold);
     storage.db.prepare("UPDATE index_jobs SET status = 'done', last_error = NULL, updated_at = ? WHERE id = ?").run(timestamp, job.id);
     return { ...job, status: "done" };
