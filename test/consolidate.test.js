@@ -95,6 +95,28 @@ test("duplicate captures and citations on other days count as recurrence", async
   });
 });
 
+test("citations resolve at every prefix length an agent may type; an ambiguous prefix counts for nothing", async () => {
+  await withHub(async ({ hub, project, skillsDir }) => {
+    const summary = "Retry the S3 upload when the object reports not uploaded for a few seconds after upload";
+    const add = (id, text, at) => {
+      hub.storage.insertFix({ id, projectPath: project, agent: "claude-code", summary: text, filesChanged: [], verification: "npm test passed" });
+      hub.storage.db.prepare("UPDATE fix_entries SET created_at = ? WHERE id = ?").run(at, id);
+    };
+    add("abcd1234-0000-4000-8000-000000000001", summary, daysAgo(5));
+    metric(hub, project, "recall_cited", { idPrefix: "abcd1234", sessionId: "s-8" }, daysAgo(3)); // eight characters
+    metric(hub, project, "recall_cited", { idPrefix: "ABCD", sessionId: "s-4" }, daysAgo(1)); // four, as typed
+    const [entry] = mineCandidates(hub.storage, { since: "7d", skillsDir }).targets;
+    assert.deepEqual(entry.candidates[0].signals, { captured: 1, cited: 2 });
+    assert.equal(entry.candidates[0].days, 3);
+
+    // two records now share the four-character prefix: it no longer names either of them
+    add("abcd9999-0000-4000-8000-000000000002", "Pin the worker image tag in the deploy manifest", daysAgo(5));
+    metric(hub, project, "recall_cited", { idPrefix: "abcd", sessionId: "s-x" }, daysAgo(2));
+    const again = mineCandidates(hub.storage, { since: "7d", skillsDir }).targets[0].candidates;
+    assert.deepEqual(again.map((c) => c.days), [2], "only the eight-character citation still counts");
+  });
+});
+
 test("a record naming a skill targets that skill's SKILL.md", async () => {
   await withHub(async ({ hub, project, skillsDir }) => {
     const first = decision(hub, project, "In the weekly-report template edit both the SECTIONS array and the REPORT object", daysAgo(5));
@@ -116,7 +138,7 @@ test("a rule the target file already states is skipped; a contradicted line is f
     const first = decision(hub, project, RULE, daysAgo(6));
     decision(hub, project, `${RULE} again`, daysAgo(2), first);
     const stale = decision(hub, project, "Builds for iOS always run in the cloud with eas build, never on the local MacBook", daysAgo(20));
-    metric(hub, project, "recall_contradicted", { idPrefix: stale.replace(/-/g, "").slice(0, 6), reason: "builds moved to the local Mac" }, daysAgo(1));
+    metric(hub, project, "recall_contradicted", { idPrefix: stale.replace(/-/g, "").slice(0, 8), reason: "builds moved to the local Mac" }, daysAgo(1));
 
     const [entry] = mineCandidates(hub.storage, { since: "7d", skillsDir }).targets;
     assert.equal(entry.candidates.length, 0);

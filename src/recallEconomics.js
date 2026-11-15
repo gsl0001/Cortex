@@ -170,7 +170,9 @@ export function computeRecallEconomics(storage, { projectPath = null, since, ses
   const injectionSession = new Map(); // recall_injected metric id -> session id
   // where a session ran, whatever the window: a session older than `since` can still cite
   const sessionOwner = { get: (id) => db.prepare("SELECT project_path AS projectPath FROM agent_sessions WHERE id = ?").get(id) };
-  const isFatigued = (id) => (recordSessions.get(id)?.size || 0) >= FATIGUE_SESSIONS && !citedPrefixes.has(String(id).replace(/-/g, "").slice(0, 6));
+  // cited prefixes are 4 to 8 characters, as the agent typed them
+  const wasCited = (id) => { const compact = String(id).replace(/-/g, "").toLowerCase(); return [...citedPrefixes].some((p) => compact.startsWith(p)); };
+  const isFatigued = (id) => (recordSessions.get(id)?.size || 0) >= FATIGUE_SESSIONS && !wasCited(id);
   const bumpUnkeyed = (project, tokens) => {
     const entry = unkeyed.get(project) || { count: 0, tokens: 0 };
     entry.count += 1; entry.tokens += tokens; unkeyed.set(project, entry);
@@ -224,7 +226,7 @@ export function computeRecallEconomics(storage, { projectPath = null, since, ses
       }
       case "recall_cited":
         if (payload.resolved === false) break;
-        if (payload.idPrefix) citedPrefixes.add(payload.idPrefix);
+        if (payload.idPrefix) citedPrefixes.add(String(payload.idPrefix).toLowerCase());
         if (payload.source === "unserved") { s.citedUnserved += 1; break; }
         s.cited += 1;
         break;

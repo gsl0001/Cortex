@@ -93,7 +93,23 @@ export function mineCandidates(storage, { projectPath = null, since = "7d", now 
   const scope = projectPath ? normalizeProjectPath(projectPath) : null;
   const records = storage.db.prepare(RECORD_SQL).all();
   const byId = new Map(records.map((r) => [r.id, r]));
-  const byPrefix = new Map(records.map((r) => [prefixOf(r.id), r]));
+  // Agents cite with a 4 to 8 character prefix ([m:xxxx] .. [m:xxxxxxxx]) and the metric keeps
+  // what they typed, so a prefix is matched against record ids, never an exact-length key.
+  // A prefix that fits more than one record names none of them.
+  const compactIds = records.map((r) => [String(r.id).replace(/-/g, "").toLowerCase(), r]);
+  const resolved = new Map();
+  const byPrefix = {
+    get(prefix) {
+      const key = String(prefix || "").toLowerCase();
+      if (key.length < 4) return undefined;
+      if (!resolved.has(key)) {
+        const hits = compactIds.filter(([id]) => id.startsWith(key));
+        resolved.set(key, hits.length === 1 ? hits[0][1] : undefined);
+      }
+      return resolved.get(key);
+    },
+    has(prefix) { return Boolean(this.get(prefix)); },
+  };
   const supersededBy = new Map();
   for (const r of records) if (r.supersedesId && byId.has(r.supersedesId)) supersededBy.set(r.supersedesId, r.id);
   // The live end of a supersede chain stands for the whole chain; the hop cap guards a cycle.

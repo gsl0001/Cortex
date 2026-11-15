@@ -6,7 +6,7 @@
 
 ![Node](https://img.shields.io/badge/node-%E2%89%A5%2025-3c873a)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Tests](https://img.shields.io/badge/tests-418%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-419%20passing-brightgreen)
 ![Database](https://img.shields.io/badge/database-node%3Asqlite-informational)
 ![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex-8a63d2)
 
@@ -464,7 +464,7 @@ setup, agent adapters, notifications, and the autonomy-tier details.
 ## Development
 
 ```bash
-npm test            # backend suite (node:test) — 366 tests
+npm test            # backend suite (node:test) — 367 tests
 npm run web:test    # web UI tests (vitest) — 52 tests
 npm run web:build   # production build
 ```
