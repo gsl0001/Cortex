@@ -164,6 +164,20 @@ test("two repos with the same basename get separate proposal files", async () =>
   });
 });
 
+test("a repo named README does not have its proposal overwritten by the run summary", async () => {
+  await withHub(async ({ hub, dir, skillsDir, out }) => {
+    const project = join(dir, "README");
+    await mkdir(project);
+    const first = decision(hub, project, RULE, daysAgo(6));
+    decision(hub, project, `${RULE} again`, daysAgo(2), first);
+    const result = await consolidate(hub, { since: "7d", skillsDir, outDir: out });
+    assert.equal(result.targets.length, 1);
+    assert.match(result.targets[0].file, /README-[0-9a-f]{6}\.md$/);
+    assert.match(await readFile(result.targets[0].file, "utf8"), /## Recurring records/);
+    assert.match(await readFile(join(result.outDir, "README.md"), "utf8"), /^# Consolidation/);
+  });
+});
+
 function fakeModel(output, code = 0) {
   const prompts = [];
   const spawnImpl = () => {

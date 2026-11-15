@@ -1082,15 +1082,25 @@ function StatsView({ projects }) {
     api(`/stats?project=${encodeURIComponent(project)}`).then(setStats).catch((e) => setError(e.message));
     api(`/audit?project=${encodeURIComponent(project)}`).then(setAudit).catch((e) => setError(e.message));
   }, [project]);
-  // Portfolio-wide, fetched once: the per-project table needs every project side by side, and
-  // the sessions table filters client-side on the selected project.
+  // Portfolio-wide, fetched once: the per-project table needs every project side by side.
   const [economics, setEconomics] = useState(null);
   useEffect(() => {
-    api("/recall-economics?since=14d&sessions=200")
+    api("/recall-economics?since=14d&sessions=1")
       .then((report) => setEconomics(report && typeof report === "object" && Array.isArray(report.projects) ? report : null))
       .catch((e) => setError(e.message));
   }, []);
-  const projectSessions = (economics?.sessions || []).filter((s) => s.projectPath === project).slice(0, 40);
+  // The sessions table asks for the selected project's own sessions: the portfolio report
+  // caps its session list machine-wide, so a quiet project's sessions may not be in it.
+  const [projectSessions, setProjectSessions] = useState([]);
+  useEffect(() => {
+    if (!project) return undefined;
+    let current = true;
+    setProjectSessions([]);
+    api(`/recall-economics?since=14d&sessions=40&project=${encodeURIComponent(project)}`)
+      .then((report) => { if (current) setProjectSessions(Array.isArray(report?.sessions) ? report.sessions : []); })
+      .catch((e) => setError(e.message));
+    return () => { current = false; };
+  }, [project]);
   const projectName = projects.find((p) => p.projectPath === project)?.name || project;
 
   return (

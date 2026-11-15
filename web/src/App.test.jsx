@@ -796,7 +796,12 @@ test("Health & audit renders the recall-economics tables: project rollup and the
     if (String(path).includes("/projects")) return Promise.resolve({ ok: true, json: async () => [{ projectPath: "C:/demo", name: "Demo" }, { projectPath: "C:/other", name: "Other" }] });
     if (String(path).includes("/stats")) return Promise.resolve({ ok: true, json: async () => stats });
     if (String(path).includes("/audit")) return Promise.resolve({ ok: true, json: async () => ({ issues: [] }) });
-    if (String(path).includes("/recall-economics")) return Promise.resolve({ ok: true, json: async () => economics });
+    if (String(path).includes("/recall-economics")) {
+      // the sessions table asks for the selected project's own sessions, as the server scopes them
+      const scope = new URL(String(path), "http://x").searchParams.get("project");
+      const body = scope ? { ...economics, sessions: economics.sessions.filter((s) => s.projectPath === scope) } : { ...economics, sessions: [] };
+      return Promise.resolve({ ok: true, json: async () => body });
+    }
     return Promise.resolve({ ok: true, json: async () => [] });
   }));
   render(<App />);
@@ -812,7 +817,7 @@ test("Health & audit renders the recall-economics tables: project rollup and the
 
   // sessions table is scoped to the selected project: the cold session from C:/other is not listed
   const sessions = within(await screen.findByRole("table", { name: "Recent sessions for Demo" }));
-  expect(sessions.getByText("thrash")).toBeInTheDocument();
+  expect(await sessions.findByText("thrash")).toBeInTheDocument(); // arrives with the scoped request
   expect(sessions.getByText("use the retry fix")).toBeInTheDocument();
   expect(sessions.queryByText("not this project")).not.toBeInTheDocument();
   expect(sessions.getByText("0 (+1 unserved)")).toBeInTheDocument();

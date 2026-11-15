@@ -260,7 +260,7 @@ export async function consolidate(hub, { outDir, draft = false, spawnImpl, model
   const dir = join(outDir || join(dirname(hub.storage.dbPath), "proposals"), day(now.toISOString()));
   mkdirSync(dir, { recursive: true });
   const written = [];
-  const usedNames = new Set();
+  const usedNames = new Set(["readme"]); // README.md is the run's own summary
   for (const entry of mined.targets) {
     let drafted = null;
     if (draft) {
