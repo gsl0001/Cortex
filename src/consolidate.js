@@ -111,11 +111,24 @@ export function mineCandidates(storage, { projectPath = null, since = "7d", now 
     has(prefix) { return Boolean(this.get(prefix)); },
   };
   const supersededBy = new Map();
-  for (const r of records) if (r.supersedesId && byId.has(r.supersedesId)) supersededBy.set(r.supersedesId, r.id);
-  // The live end of a supersede chain stands for the whole chain; the hop cap guards a cycle.
+  // A supersedes edge is either a restatement (same rule, new words) or a reversal (a
+  // "Supersedes:" marker replacing the rule with a different one). Only a restatement carries
+  // the older record's evidence forward: support for the old rule is not recurrence of the
+  // rule that replaced it.
+  const restated = new Set(); // ids of records that restate the record they supersede
+  for (const r of records) {
+    if (!r.supersedesId || !byId.has(r.supersedesId)) continue;
+    supersededBy.set(r.supersedesId, r.id);
+    if (containment(keyTokens(byId.get(r.supersedesId).text), keyTokens(r.text)) >= MERGE) restated.add(r.id);
+  }
+  // The live end of a chain of restatements stands for the whole chain; a record that was
+  // reversed has no live end and its evidence counts for nothing. The hop cap guards a cycle.
   const headOf = (id) => {
     let current = id;
-    for (let hops = 0; supersededBy.has(current) && hops < 100; hops += 1) current = supersededBy.get(current);
+    for (let hops = 0; supersededBy.has(current) && hops < 100; hops += 1) {
+      current = supersededBy.get(current);
+      if (!restated.has(current)) return undefined;
+    }
     return byId.get(current);
   };
 
@@ -128,7 +141,7 @@ export function mineCandidates(storage, { projectPath = null, since = "7d", now 
     entry.days.add(day(when));
     entry.signals.set(kind, (entry.signals.get(kind) || 0) + 1);
   };
-  for (const r of records) note(r, r.createdAt, r.supersedesId ? "restated" : "captured");
+  for (const r of records) note(r, r.createdAt, restated.has(r.id) ? "restated" : "captured");
   const metrics = storage.db.prepare(`SELECT kind, payload_json AS p, created_at AS at FROM metrics_events
     WHERE kind IN ('capture_outcome', 'recall_cited', 'recall_contradicted') AND created_at >= ? AND created_at <= ?`).all(from, until);
   const contradicted = [];

@@ -166,6 +166,34 @@ test("computeRecallEconomics: per-session verdicts, project rollup, cross-projec
   });
 });
 
+test("distill jobs are excluded from fatigue evidence, not only from the session list", async () => {
+  await withHub(async (hub, dir) => {
+    hub.upsertProjectProfile({ projectPath: dir, name: "Econ", mode: "general", summary: "" });
+    const s = hub.storage;
+    const serve = (id) => s.recordMetric("recall_injected", dir, { sessionId: id, usedTokens: 100, maxTokens: 600, injectedFixIds: ["abcdef12-0000-4000-8000-000000000001"], gated: false });
+    for (let i = 0; i < 10; i += 1) {
+      s.insertSession({ id: `distill-${i}`, projectPath: dir, agent: "claude-code", source: "t", goal: "You are distilling a coding-agent session transcript into durable memory records.", dirtyFiles: [], status: "finished" });
+      serve(`distill-${i}`);
+    }
+    s.insertSession({ id: "real", projectPath: dir, agent: "claude-code", source: "t", goal: "real work", dirtyFiles: [], status: "finished" });
+    serve("real");
+    const report = computeRecallEconomics(s, {});
+    assert.equal(report.totals.sessions, 1);
+    assert.equal(report.totals.distillExcluded, 10);
+    assert.equal(report.totals.slots, 1);
+    // one eligible session saw the record: far below the fatigue threshold
+    assert.equal(report.totals.fatiguedSlotPct, 0);
+
+    // a distill job citing the record does not clear fatigue for real sessions either
+    for (let i = 0; i < 10; i += 1) {
+      s.insertSession({ id: `real-${i}`, projectPath: dir, agent: "claude-code", source: "t", goal: "more work", dirtyFiles: [], status: "finished" });
+      serve(`real-${i}`);
+    }
+    s.recordMetric("recall_cited", dir, { sessionId: "distill-0", idPrefix: "abcdef", resolved: true, source: "brief" });
+    assert.equal(computeRecallEconomics(s, {}).totals.fatiguedSlotPct, 100);
+  });
+});
+
 test("GET /api/v1/recall-economics serves the portfolio, a project scope, and rejects a bad window", async () => {
   await withHub(async (hub, dir) => {
     hub.upsertProjectProfile({ projectPath: dir, name: "Econ", mode: "general", summary: "" });

@@ -117,6 +117,24 @@ test("citations resolve at every prefix length an agent may type; an ambiguous p
   });
 });
 
+test("a reversal does not inherit the evidence of the decision it replaced", async () => {
+  await withHub(async ({ hub, project, skillsDir }) => {
+    const keep = decision(hub, project, "Customer audit logs are retained permanently and never purged from the warehouse", daysAgo(6));
+    metric(hub, project, "recall_cited", { idPrefix: keep.replace(/-/g, "").slice(0, 6), sessionId: "s-1" }, daysAgo(4));
+    // stated once, on one day: support for permanent retention is not recurrence of deletion
+    decision(hub, project, "Delete customer audit logs after thirty days to meet the privacy policy", daysAgo(1), keep);
+    assert.equal(mineCandidates(hub.storage, { since: "7d", skillsDir }).targets.length, 0);
+
+    // restating the new rule on another day is what makes it recur
+    const again = decision(hub, project, "Delete customer audit logs after thirty days to meet the privacy policy, including backups", daysAgo(0));
+    hub.storage.db.prepare("UPDATE decision_entries SET supersedes_id = (SELECT id FROM decision_entries WHERE decision LIKE 'Delete%policy') WHERE id = ?").run(again);
+    const [entry] = mineCandidates(hub.storage, { since: "7d", skillsDir }).targets;
+    assert.equal(entry.candidates.length, 1);
+    assert.match(entry.candidates[0].text, /thirty days/);
+    assert.deepEqual(entry.candidates[0].signals, { captured: 1, restated: 1 });
+  });
+});
+
 test("a record naming a skill targets that skill's SKILL.md", async () => {
   await withHub(async ({ hub, project, skillsDir }) => {
     const first = decision(hub, project, "In the weekly-report template edit both the SECTIONS array and the REPORT object", daysAgo(5));

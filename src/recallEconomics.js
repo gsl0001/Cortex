@@ -168,6 +168,8 @@ export function computeRecallEconomics(storage, { projectPath = null, since, ses
   const recordSessions = new Map(); // record id -> Set(session id) it was served to
   const citedPrefixes = new Set();
   const injectionSession = new Map(); // recall_injected metric id -> session id
+  // not windowed: a distill job that started before `since` still writes events inside it
+  const distillIds = new Set(db.prepare("SELECT id FROM agent_sessions WHERE goal LIKE ?").all(`${DISTILL_GOAL_PREFIX}%`).map((row) => row.id));
   // where a session ran, whatever the window: a session older than `since` can still cite
   const sessionOwner = { get: (id) => db.prepare("SELECT project_path AS projectPath FROM agent_sessions WHERE id = ?").get(id) };
   // cited prefixes are 4 to 8 characters, as the agent typed them
@@ -185,6 +187,9 @@ export function computeRecallEconomics(storage, { projectPath = null, since, ses
       || (row.kind === "recall_useful" ? injectionSession.get(payload.recallMetricId) : null);
     if (row.kind === "recall_injected" && !sessionId) { bumpUnkeyed(row.projectPath, Number(payload.usedTokens || 0)); continue; }
     if (!sessionId) continue;
+    // excluded from the report, so excluded from its evidence too: what a distill job was
+    // served or cited must not move the fatigue numbers of real sessions
+    if (distillIds.has(sessionId)) continue;
     if (row.kind === "recall_injected") injectionSession.set(row.id, sessionId);
     // A citation is stored under the CITED record's project, which says nothing about where
     // the citing session ran. A session not seen yet is placed by its own row; in a scoped
