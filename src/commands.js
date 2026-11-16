@@ -12,6 +12,7 @@ import { OllamaEmbeddingProvider } from "./embeddingProvider.js";
 import { packContext } from "./tokenPacker.js";
 import { CortexStorage, normalizeProjectPath } from "./storage.js";
 import { computeStats } from "./stats.js";
+import { computeRecallEconomics } from "./recallEconomics.js";
 import { buildProjectIndex, isOffTopic } from "./topicScope.js";
 import {
   autoPlanWeek,
@@ -865,6 +866,7 @@ export class Cortex {
   }
 
   search(input = {}) {
+    const startedAt = performance.now();
     drainIndexJobs(this.storage);
     const search = searchMemory(this.storage, { embeddingProvider: this.embeddingProvider, ...input });
     const context = packContext(search.results, { maxTokens: input.maxTokens || 1500 });
@@ -875,7 +877,19 @@ export class Cortex {
     if (!input.internal) {
       try {
         this.storage.recordMetric("search_used", normalizeProjectPath(input.projectPath || process.cwd()), {
-          agent: input.agent || null, query: String(input.query || "").slice(0, 120), results: search.results?.length ?? 0,
+          agent: input.agent || null,
+          // traceVersion 1: result identities and pack losses, read by scripts/search-diagnostics.mjs
+          traceVersion: 1,
+          query: String(input.query || "").slice(0, 2000),
+          queryTruncated: String(input.query || "").length > 2000,
+          results: search.results?.length ?? 0,
+          returnedIds: search.results.map((record) => record.id).slice(0, 100),
+          packedIds: context.citations.map((record) => record.id).slice(0, 100),
+          budgetExcluded: context.excluded.filter((record) => record.reason === "budget").length,
+          duplicateExcluded: context.excluded.filter((record) => record.reason === "duplicate").length,
+          usedTokens: context.usedTokens, maxTokens: context.maxTokens,
+          embeddingMode: this.embeddingProvider?.queryVec && this.embeddingProvider.queryKey === String(input.query || "") ? "ollama" : "minhash",
+          searchDurationMs: Math.round((performance.now() - startedAt) * 100) / 100,
         });
       } catch { /* observability is best-effort */ }
     }
@@ -884,6 +898,16 @@ export class Cortex {
       context,
       text: context.text || "No matching durable memory.",
     };
+  }
+
+  // Which sessions pulled from memory vs spun up cold, and what the brief cost each project —
+  // see recallEconomics.js for the verdicts. `projectPath` null = whole portfolio.
+  recallEconomics(input = {}) {
+    return computeRecallEconomics(this.storage, {
+      projectPath: input.projectPath ? normalizeProjectPath(input.projectPath) : null,
+      since: input.since,
+      sessionLimit: input.sessionLimit,
+    });
   }
 
   stats(input = {}) {

@@ -468,6 +468,18 @@ export function createCortexServer({ hub, notifier = createNotifier(), host = "1
         if (!projectPath) return json(response, 400, { error: { code: "invalid_request", message: "project is required" } });
         return json(response, 200, hub.stats({ projectPath }));
       }
+      if (url.pathname === "/api/v1/recall-economics") {
+        // project optional: omitted = the whole portfolio; since = ISO or "<n>d" (default 14d)
+        try {
+          return json(response, 200, hub.recallEconomics({
+            projectPath: url.searchParams.get("project") || null,
+            since: url.searchParams.get("since") || undefined,
+            sessionLimit: url.searchParams.get("sessions") ? Number(url.searchParams.get("sessions")) : undefined,
+          }));
+        } catch (error) {
+          return json(response, 400, { error: { code: "invalid_request", message: error.message } });
+        }
+      }
       if (url.pathname === "/api/v1/audit") return json(response, 200, hub.audit({ projectPath: url.searchParams.get("project") || undefined }));
       if (url.pathname === "/api/v1/goals") {
         const today = url.searchParams.get("today") || new Date().toISOString().slice(0, 10);

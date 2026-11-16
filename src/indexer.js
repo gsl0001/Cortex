@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { LocalMinHashEmbeddingProvider } from "./embeddingProvider.js";
+import { chunkText } from "./chunk.js";
 
 export function enqueueRecord(storage, recordId, recordType) {
   const timestamp = new Date().toISOString();
@@ -40,15 +41,25 @@ function linkSimilarRecords(storage, job, content, embeddingProvider, threshold)
     "SELECT entity_id AS id FROM record_entities WHERE record_id = ? AND role = 'subject'",
   ).get(job.recordId);
   if (!subject) return;
-  for (const candidate of storage.db.prepare(`
+  // The cap counts records, not chunk rows: capping rows let a single long record fill the
+  // window and hide every older record. A candidate scores as its best chunk, so related
+  // material anywhere in a long record still links it.
+  const best = new Map(); // record id -> highest similarity across its chunks
+  for (const chunk of storage.db.prepare(`
     SELECT record_id AS id, title, body FROM search_chunks
-    WHERE project_path = ? AND record_id != ?
-    ORDER BY rowid DESC LIMIT ?
+    WHERE record_id IN (
+      SELECT record_id FROM search_chunks WHERE project_path = ? AND record_id != ?
+      GROUP BY record_id ORDER BY MIN(rowid) DESC LIMIT ?
+    )
   `).all(content.record.projectPath, job.recordId, SIMILARITY_CANDIDATE_CAP)) {
     const confidence = embeddingProvider.similarity(
       `${content.title} ${content.body}`,
-      `${candidate.title} ${candidate.body}`,
+      `${chunk.title} ${chunk.body}`,
     );
+    if (confidence > (best.get(chunk.id) ?? -1)) best.set(chunk.id, confidence);
+  }
+  for (const [candidateId, confidence] of best) {
+    const candidate = { id: candidateId };
     if (confidence < threshold) continue;
     const target = storage.db.prepare(
       "SELECT entity_id AS id FROM record_entities WHERE record_id = ? AND role = 'subject'",
@@ -88,11 +99,20 @@ export function runNextIndexJob(storage, {
   storage.db.prepare("UPDATE index_jobs SET status = 'running', attempts = attempts + 1, updated_at = ? WHERE id = ?").run(timestamp, job.id);
   try {
     const content = recordContent(storage, job);
+    const previous = storage.db.prepare("SELECT title, body FROM search_chunks WHERE record_id = ? ORDER BY rowid").all(job.recordId);
+    const chunks = content ? chunkText(content.body) : [];
+    const unchanged = content && previous.length === chunks.length
+      && previous.every((row, i) => row.title === content.title && row.body === chunks[i]);
+    // changed text invalidates the record's vectors: "<id>" for chunk 0, "<id>#<n>" after it
+    if (!unchanged) {
+      storage.db.prepare("DELETE FROM embedding_vectors WHERE record_id = ? OR record_id LIKE ? || '#%'").run(job.recordId, job.recordId);
+    }
     storage.db.prepare("DELETE FROM search_chunks WHERE record_id = ?").run(job.recordId);
-    if (content) storage.db.prepare(`
+    const insert = storage.db.prepare(`
       INSERT INTO search_chunks (record_id, project_path, record_type, title, body, tags)
       VALUES (?, ?, ?, ?, ?, ?)
-    `).run(job.recordId, content.record.projectPath, job.recordType, content.title, content.body, content.tags);
+    `);
+    for (const body of chunks) insert.run(job.recordId, content.record.projectPath, job.recordType, content.title, body, content.tags);
     if (content) linkSimilarRecords(storage, job, content, embeddingProvider, similarityThreshold);
     storage.db.prepare("UPDATE index_jobs SET status = 'done', last_error = NULL, updated_at = ? WHERE id = ?").run(timestamp, job.id);
     return { ...job, status: "done" };

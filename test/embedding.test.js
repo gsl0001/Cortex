@@ -47,6 +47,20 @@ test("embedMissing backfills chunks, is idempotent, and prunes orphans", async (
   });
 });
 
+test("a replaced vector is picked up by the next prepare even though the vector count is unchanged", async () => {
+  await withHub(async (hub) => {
+    const provider = new OllamaEmbeddingProvider({ storage: hub.storage, fetchImpl: stubFetch });
+    hub.storage.putEmbedding("rec-1", provider.model, float32ToBlob([0, 1]));
+    await provider.prepare("alpha");
+    assert.equal(provider.similarity("alpha", "ignored", "rec-1"), 0); // cosine([1,0],[0,1])
+    // re-indexing changed text: the vector is deleted and re-embedded, one row before and after
+    hub.storage.db.prepare("DELETE FROM embedding_vectors WHERE record_id = 'rec-1'").run();
+    hub.storage.putEmbedding("rec-1", provider.model, float32ToBlob([1, 0]));
+    await provider.prepare("alpha");
+    assert.equal(provider.similarity("alpha", "ignored", "rec-1"), 1);
+  });
+});
+
 test("prepared provider scores by cosine per record id and falls back per row and per query", async () => {
   await withHub(async (hub, dir) => {
     const alpha = hub.captureCandidate({ projectPath: dir, agent: "codex", message: "Fixed alpha cache stampede. Verification: npm test passed." });

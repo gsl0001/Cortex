@@ -69,6 +69,54 @@ test("failed index jobs retry with exponential backoff and stop after five attem
   }
 });
 
+test("a long record's chunks do not use up the similarity candidate cap", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cortex-index-similar-long-"));
+  const hub = createCortex({ dbPath: join(dir, "index.sqlite") });
+  try {
+    const addFix = (id, summary) => {
+      const record = hub.storage.insertFix({ id, projectPath: dir, agent: "a", summary, filesChanged: [] });
+      linkCapturedRecord(hub.storage, record, "fix");
+      enqueueRecord(hub.storage, id, "fix");
+      drainIndexJobs(hub.storage);
+    };
+    addFix("fix-a", "websocket retry backoff failure");
+    // unrelated, and more chunk rows than the 200-candidate cap
+    hub.addResearchEntry({ projectPath: dir, agent: "a", question: "Quarterly invoice export review", finding: "The ledger totals matched the bank statement for every month reviewed. ".repeat(4500), sources: [] });
+    drainIndexJobs(hub.storage);
+    assert.ok(hub.storage.db.prepare("SELECT COUNT(*) AS n FROM search_chunks WHERE record_type = 'research'").get().n > 200);
+    addFix("fix-b", "websocket retry backoff handling");
+
+    const links = hub.storage.db.prepare("SELECT origin_record_id AS origin FROM links WHERE link_type = 'similar_to'").all();
+    assert.deepEqual(links.map((link) => link.origin), ["fix-b"]);
+  } finally {
+    hub.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("related material late in a long record still earns a similarity link", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cortex-index-similar-tail-"));
+  const hub = createCortex({ dbPath: join(dir, "index.sqlite") });
+  try {
+    // the match is in the closing sentence, many chunks after the first
+    const finding = `${"The ledger totals matched the bank statement for every month reviewed. ".repeat(120)}Unrelated note: websocket retry backoff handling was also reviewed.`;
+    const research = hub.addResearchEntry({ projectPath: dir, agent: "a", question: "Quarterly invoice export review", finding, sources: [] });
+    linkCapturedRecord(hub.storage, hub.storage.getResearch(research.id), "research");
+    drainIndexJobs(hub.storage);
+    assert.ok(hub.storage.db.prepare("SELECT COUNT(*) AS n FROM search_chunks").get().n > 3);
+    const record = hub.storage.insertFix({ id: "fix-tail", projectPath: dir, agent: "a", summary: "websocket retry backoff handling", filesChanged: [] });
+    linkCapturedRecord(hub.storage, record, "fix");
+    enqueueRecord(hub.storage, "fix-tail", "fix");
+    drainIndexJobs(hub.storage);
+
+    const links = hub.storage.db.prepare("SELECT origin_record_id AS origin FROM links WHERE link_type = 'similar_to'").all();
+    assert.deepEqual(links.map((link) => link.origin), ["fix-tail"]);
+  } finally {
+    hub.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("indexing similar records creates one automatic similar_to edge", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cortex-index-similar-"));
   const hub = createCortex({ dbPath: join(dir, "index.sqlite") });

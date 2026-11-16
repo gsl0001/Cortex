@@ -33,7 +33,7 @@ test("Stale: correction quarantines the record, removes it from briefs, and reco
     assert.match(hub.buildBrief({ projectPath: dir, context: briefContext }).text, /retry race/);
 
     const result = hub.captureCandidate({
-      projectPath: dir, agent: "b",
+      projectPath: dir, agent: "b", sessionId: "stale-session",
       message: `Investigated the gate again. The old note is wrong. Stale: [m:${prefix}] retry race was actually fixed upstream; this advice misleads.`,
     });
     assert.notEqual(result.action, "error");
@@ -46,6 +46,9 @@ test("Stale: correction quarantines the record, removes it from briefs, and reco
     assert.equal(contradicted.length, 1);
     assert.equal(contradicted[0].payload.idPrefix, prefix);
     assert.equal(contradicted[0].payload.quarantined, "fix");
+    // keyed to its session, so recall economics counts the correction as a stale mark
+    assert.equal(contradicted[0].payload.sessionId, "stale-session");
+    assert.equal(hub.recallEconomics({}).sessions.find((s) => s.sessionId === "stale-session").staleMarks, 1);
     // a staled id is a correction, not a use — it must not count as a citation
     const cited = hub.storage.listMetrics(dir, { kind: "recall_cited" })
       .filter((m) => m.payload.idPrefix === prefix);

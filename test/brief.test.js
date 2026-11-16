@@ -68,6 +68,28 @@ test("buildProjectBrief returns token usage and keeps the skeleton", () => {
   assert.equal(brief.maxTokens, 1200);
 });
 
+test("served lists only the records the packer rendered, not every ranked candidate", () => {
+  const fixes = Array.from({ length: 12 }, (_, i) => ({
+    id: `${String(i).padStart(2, "0")}aaaa00-0000-4000-8000-000000000000`,
+    summary: `Close fill reconciliation pass ${i} repaired the watcher retry path for venue ${i}`,
+    verification: "npm test",
+  }));
+  const brief = buildProjectBrief({
+    projectPath: "C:/demo",
+    profile: { name: "Demo", mode: "general", summary: "ops" },
+    tasks: [], research: [], sessions: [], fixes,
+    context: { goalText: "repair the close fill watcher" },
+    maxTokens: 300,
+    fieldChars: 160,
+  });
+  assert.ok(brief.fixes.length > brief.served.fixes.length, "the budget cut some ranked fixes");
+  assert.ok(brief.served.fixes.length >= 1);
+  const marker = (fix) => `[m:${fix.id.replace(/-/g, "").slice(0, 6)}]`;
+  for (const fix of brief.fixes) {
+    assert.equal(brief.text.includes(marker(fix)), brief.served.fixes.includes(fix), `served must match what rendered for ${fix.id}`);
+  }
+});
+
 test("buildBrief budgets tokens and hides superseded fixes", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cortex-brief-"));
   const hub = createCortex({ dbPath: join(dir, "b.sqlite") });

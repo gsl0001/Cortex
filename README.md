@@ -6,7 +6,7 @@
 
 ![Node](https://img.shields.io/badge/node-%E2%89%A5%2025-3c873a)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Tests](https://img.shields.io/badge/tests-399%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-426%20passing-brightgreen)
 ![Database](https://img.shields.io/badge/database-node%3Asqlite-informational)
 ![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex-8a63d2)
 
@@ -354,7 +354,7 @@ attention first*:
 | **Knowledge graph** | An interactive graph of records and their typed links — manual links are saved with full confidence, inferred ones keep their own provenance |
 | **Activity log** | A chronological feed of everything captured |
 | **Portfolio** | The portfolio doctor: which projects are active, stalled, or abandoned, with lifecycle controls |
-| **Health & audit** | A read-only database health check you can run any time |
+| **Health & audit** | A read-only database health check, plus recall economics: per project and per session, whether served memory was used (`hit`), never served (`cold`), or re-injected and ignored (`thrash`), and what it cost in tokens |
 
 ---
 
@@ -391,7 +391,8 @@ Run `node src/cli.js` with no arguments for the full, always-current list.
 
 | Group | Commands |
 |---|---|
-| **Search & recall** | `search`, `brief`, `stats`, `index rebuild` |
+| **Search & recall** | `search`, `brief`, `stats`, `recall-economics`, `index rebuild` |
+| **Promotion** | `consolidate` (proposes recurring records as rules for a repo's `CLAUDE.md` or a skill; writes proposal files only) |
 | **Tasks** | `task add`, `task claim`, `task block`, `task done`, `next-task` |
 | **Capture** | `fix add`, `research add`, `session start`, `session finish` |
 | **Inbox** | `inbox add`, `inbox list`, `inbox resolve` |
@@ -405,7 +406,14 @@ Run `node src/cli.js` with no arguments for the full, always-current list.
 node src/cli.js search --project . --query "close fill" --max-tokens 1500
 node src/cli.js task add --project . --title "Fix login redirect" --type bug --priority high
 node src/cli.js audit --all --json
+node src/cli.js recall-economics --all --since 14d
+node src/cli.js consolidate --since 7d --min-days 2          # add --draft to have claude -p phrase the rules
+node scripts/search-diagnostics.mjs --db ~/.cortex/cortex.sqlite   # read-only search telemetry summary
 ```
+
+Long records are indexed as overlapping 1,200-character chunks, so a fact buried deep in
+a long research finding is still found, and the matching chunk (not the whole body) is what
+gets served within the token budget.
 
 ---
 
@@ -456,8 +464,8 @@ setup, agent adapters, notifications, and the autonomy-tier details.
 ## Development
 
 ```bash
-npm test            # backend suite (node:test) — 348 tests
-npm run web:test    # web UI tests (vitest) — 51 tests
+npm test            # backend suite (node:test) — 374 tests
+npm run web:test    # web UI tests (vitest) — 52 tests
 npm run web:build   # production build
 ```
 

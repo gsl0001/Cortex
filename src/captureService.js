@@ -137,7 +137,11 @@ function recordRecallUsefulness(storage, projectPath, agent, fixId, filesChanged
       ? matchedFixIds.length === 1
       : matchedFiles.length <= RECALL_USEFUL_MAX_FILES;
     if (!narrow) return;
-    storage.recordMetric("recall_useful", projectPath, { agent, fixId, matchedFiles, matchedFixIds, recallMetricId: recent.id });
+    storage.recordMetric("recall_useful", projectPath, {
+      agent, fixId, matchedFiles, matchedFixIds, recallMetricId: recent.id,
+      // the session the brief was served to, so recall economics can credit it
+      sessionId: recent.payload.sessionId || null,
+    });
   } catch {
     // telemetry must never block capture
   }
@@ -355,6 +359,8 @@ function recordCitations(storage, candidate) {
       const quarantined = storage.quarantineRecordByPrefix(candidate.projectPath, idPrefix);
       storage.recordMetric("recall_contradicted", candidate.projectPath, {
         agent: candidate.agent, idPrefix, reason, quarantined,
+        // recall economics attributes the correction to the session that made it
+        sessionId: candidate.sessionId || null,
       });
     }
     const cited = [...new Set(

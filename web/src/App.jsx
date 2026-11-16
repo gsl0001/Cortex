@@ -1082,6 +1082,26 @@ function StatsView({ projects }) {
     api(`/stats?project=${encodeURIComponent(project)}`).then(setStats).catch((e) => setError(e.message));
     api(`/audit?project=${encodeURIComponent(project)}`).then(setAudit).catch((e) => setError(e.message));
   }, [project]);
+  // Portfolio-wide, fetched once: the per-project table needs every project side by side.
+  const [economics, setEconomics] = useState(null);
+  useEffect(() => {
+    api("/recall-economics?since=14d&sessions=1")
+      .then((report) => setEconomics(report && typeof report === "object" && Array.isArray(report.projects) ? report : null))
+      .catch((e) => setError(e.message));
+  }, []);
+  // The sessions table asks for the selected project's own sessions: the portfolio report
+  // caps its session list machine-wide, so a quiet project's sessions may not be in it.
+  const [projectSessions, setProjectSessions] = useState([]);
+  useEffect(() => {
+    if (!project) return undefined;
+    let current = true;
+    setProjectSessions([]);
+    api(`/recall-economics?since=14d&sessions=40&project=${encodeURIComponent(project)}`)
+      .then((report) => { if (current) setProjectSessions(Array.isArray(report?.sessions) ? report.sessions : []); })
+      .catch((e) => setError(e.message));
+    return () => { current = false; };
+  }, [project]);
+  const projectName = projects.find((p) => p.projectPath === project)?.name || project;
 
   return (
     <main className="page">
@@ -1107,6 +1127,7 @@ function StatsView({ projects }) {
           </article>
         </div>
       )}
+      {economics && <RecallEconomics report={economics} sessions={projectSessions} projectName={projectName} />}
       {audit && (
         <section className="audit-section">
           <h2>Audit findings</h2>
@@ -1117,6 +1138,93 @@ function StatsView({ projects }) {
         </section>
       )}
     </main>
+  );
+}
+
+const num = (value) => (value == null ? "—" : Number(value).toLocaleString());
+const pctText = (value) => (value == null ? "—" : `${value}%`);
+const VERDICT_HINT = {
+  hit: "a served record was cited or a fix landed on a file the brief surfaced",
+  cold: "briefs fired but served no record: relevance gate withheld memory, or nothing matched",
+  thrash: "memory served in 3+ full briefs (or over 2× the cap) and never used; two is a normal session",
+  quiet: "memory served once, unused",
+  silent: "session row exists but no recall event was written: hooks did not fire",
+};
+
+// Which sessions pulled from memory vs spun up cold, and what the brief cost each project.
+// Mirrors `cortex recall-economics`; verdict definitions live in src/recallEconomics.js.
+function RecallEconomics({ report, sessions, projectName }) {
+  const t = report.totals || {};
+  return (
+    <section className="audit-section econ">
+      <h2>Recall economics <small>since {String(report.since || "").slice(0, 10)}</small></h2>
+      <p className="econ-lede">
+        Per session: <b>hit</b> = memory was cited or landed a fix; <b>cold</b> = nothing served (spun up fresh);
+        <b> thrash</b> = the brief injected 3+ times (two is normal: start + first prompt) and never used; <b>quiet</b> = served once, unused.
+        Wasted = brief tokens spent in thrash + quiet sessions. Hub % ctx = injected tokens as a share of all context the session processed (from transcripts).
+      </p>
+      <div className="cards">
+        <article className="card"><h2>{num(t.sessions)}</h2><p>sessions · hit rate {pctText(t.hitRatePct)} of sessions memory was served to</p></article>
+        <article className="card"><h2>{num(t.tokensInjected)}</h2><p>brief + JIT tokens injected · {num(t.tokensOnHits)} on hits</p></article>
+        <article className={`card${Number(t.tokensWasted) > Number(t.tokensOnHits) ? " metric-attention" : ""}`}>
+          <h2>{num(t.tokensWasted)}</h2><p>tokens wasted (thrash {num(t.thrash)} + quiet {num(t.quiet)} sessions)</p>
+        </article>
+        <article className="card"><h2>{pctText(t.skipRatePct)}</h2><p>delta-skip rate (unchanged brief not re-sent)</p></article>
+        <article className="card"><h2>{num(t.unregisteredStarts)}</h2><p>sessions started outside any registered project</p></article>
+      </div>
+      <div className="portfolio-table-wrap">
+        <table className="portfolio-table econ-table" aria-label="Recall economics by project">
+          <thead>
+            <tr>
+              <th>Project</th><th>Sessions</th><th>Hit</th><th>Cold</th><th>Thrash</th><th>Quiet</th><th>Silent</th>
+              <th>Hit %</th><th>Injected</th><th>Wasted</th><th>Skip %</th><th>Median age (d)</th><th>Hub % ctx</th>
+            </tr>
+          </thead>
+          <tbody>
+            {report.projects.map((p) => (
+              <tr key={p.projectPath} className={p.thrash > 0 && p.hit === 0 ? "econ-row-attention" : undefined}>
+                <td><strong>{p.name}</strong><small>{p.projectPath}</small></td>
+                <td>{num(p.sessions)}</td><td>{num(p.hit)}</td><td>{num(p.cold)}</td><td>{num(p.thrash)}</td><td>{num(p.quiet)}</td><td>{num(p.silent)}</td>
+                <td>{pctText(p.hitRatePct)}</td><td>{num(p.tokensInjected)}</td><td>{num(p.tokensWasted)}</td><td>{pctText(p.skipRatePct)}</td>
+                <td>{num(p.medianServedAgeDays)}</td><td>{p.usage?.hubSharePct == null ? "—" : `${p.usage.hubSharePct}%`}</td>
+              </tr>
+            ))}
+            {report.projects.length === 0 && <tr><td colSpan={13}>No recall events in this window.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      {report.unregistered?.length > 0 && (
+        <p className="econ-unregistered">
+          Unregistered starts: {report.unregistered.map((u) => `${u.count}× ${u.cwd}`).join(" · ")}
+        </p>
+      )}
+      <h3>Recent sessions · {projectName}</h3>
+      <div className="portfolio-table-wrap">
+        <table className="portfolio-table econ-table" aria-label={`Recent sessions for ${projectName}`}>
+          <thead>
+            <tr>
+              <th>Started</th><th>Verdict</th><th>Goal</th><th>Briefs</th><th>Skipped</th><th>Served</th>
+              <th>Tokens</th><th>Cited</th><th>Age (d)</th><th>Context tokens</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sessions.map((s) => (
+              <tr key={s.sessionId}>
+                <td>{String(s.startedAt || "").slice(0, 16).replace("T", " ")}</td>
+                <td><span className={`econ-verdict econ-${s.verdict}`} title={VERDICT_HINT[s.verdict]}>{s.verdict}</span></td>
+                <td>{s.goal || "—"}</td>
+                <td>{num(s.briefsInjected)}{s.briefsGated ? ` (${s.briefsGated} gated)` : ""}</td>
+                <td>{num(s.briefsSkipped)}</td><td>{num(s.servedRecords)}</td><td>{num(s.tokensInjected)}</td>
+                <td>{num(s.cited)}{s.citedUnserved ? ` (+${s.citedUnserved} unserved)` : ""}</td>
+                <td>{num(s.medianServedAgeDays)}</td>
+                <td>{s.usage ? num(s.usage.contextTokens) : "—"}</td>
+              </tr>
+            ))}
+            {sessions.length === 0 && <tr><td colSpan={10}>No sessions for this project in the window.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 

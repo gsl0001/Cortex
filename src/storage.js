@@ -5,6 +5,10 @@ import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { assertLinkType } from "./linkTypes.js";
+import { chunkText } from "./chunk.js";
+
+// Sessions whose goal starts with this are the hub's own headless distill runs (distill.js).
+export const DISTILL_GOAL_PREFIX = "You are distilling";
 
 // Normalized once: an OS temp directory is scratch space, never a real project, even if it
 // happens to be nested under a git-initialized ancestor (e.g. a stray .git at $HOME, which
@@ -273,6 +277,7 @@ export class CortexStorage {
     if (currentVersion < 21) this.migrateEmbeddingSchema();
     if (currentVersion < 22) this.migrateDeliverableSchema();
     if (currentVersion < 23) this.migrateSearchTokenizerSchema();
+    if (currentVersion < 24) this.migrateChunkedSearchSchema();
   }
 
   // Evidence contracts: 91 of 105 completed tasks produced no commit — demos, store pages,
@@ -301,7 +306,21 @@ export class CortexStorage {
   // score and (via crossProjectMatches) the brief. Rebuilt synchronously here — a few
   // thousand rows, sub-second — instead of via index_jobs, whose drain runs inside the
   // recall hook and would blow its 10s timeout on a full reindex.
-  migrateSearchTokenizerSchema() {
+  migrateSearchTokenizerSchema() { this.rebuildSearchChunks(23); }
+
+  // Schema 24: long bodies are indexed as overlapping chunks (chunk.js). Chunk 0 keeps the
+  // record's existing vector row; later chunks get "<id>#<n>" rows from the embedding sweep.
+  migrateChunkedSearchSchema() {
+    this.rebuildSearchChunks(24);
+    // A long record's old vector embedded the whole body; its chunk-0 text is now different.
+    // The table guard is for a database that skipped straight past the embedding migration.
+    if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'embedding_vectors'").get()) {
+      this.db.prepare(`DELETE FROM embedding_vectors WHERE record_id IN (
+        SELECT record_id FROM search_chunks GROUP BY record_id HAVING COUNT(*) > 1)`).run();
+    }
+  }
+
+  rebuildSearchChunks(version) {
     const parseList = (value) => { try { return JSON.parse(value || "[]").join(" "); } catch { return ""; } };
     // a mid-version DB may predate a record table (migration test fixtures do) — skip, don't throw
     const hasTable = (name) => Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
@@ -319,10 +338,11 @@ export class CortexStorage {
           tokenize = 'porter unicode61'
         );
       `);
-      const insert = this.db.prepare(`
+      const insertRow = this.db.prepare(`
         INSERT INTO search_chunks (record_id, project_path, record_type, title, body, tags)
         VALUES (?, ?, ?, ?, ?, ?)
       `);
+      const insert = { run: (id, project, type, title, body, tags) => { for (const chunk of chunkText(body)) insertRow.run(id, project, type, title, chunk, tags); } };
       // same content mapping as indexer.recordContent, off raw rows
       if (hasTable("fix_entries")) for (const r of this.db.prepare("SELECT id, project_path, summary, verification, residual_risk, files_changed FROM fix_entries").all()) {
         insert.run(r.id, r.project_path, "fix", r.summary || "", [r.verification, r.residual_risk].filter(Boolean).join(" "), parseList(r.files_changed));
@@ -333,7 +353,7 @@ export class CortexStorage {
       if (hasTable("decision_entries")) for (const r of this.db.prepare("SELECT id, project_path, decision, rationale, alternatives FROM decision_entries").all()) {
         insert.run(r.id, r.project_path, "decision", r.decision || "", [r.rationale, r.alternatives].filter(Boolean).join(" "), "");
       }
-      this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(23, nowIso());
+      this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(version, nowIso());
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -366,6 +386,13 @@ export class CortexStorage {
     return this.db.prepare("SELECT COUNT(*) AS count FROM embedding_vectors").get().count;
   }
 
+  // Changes whenever the stored vectors do. Count and newest timestamp catch writes from any
+  // process; the in-process counter catches a replacement inside the same millisecond.
+  embeddingVersion() {
+    const row = this.db.prepare("SELECT COUNT(*) AS n, MAX(created_at) AS latest FROM embedding_vectors").get();
+    return `${row.n}|${row.latest || ""}|${this.embeddingWrites || 0}`;
+  }
+
   allEmbeddings() {
     return this.db.prepare("SELECT record_id AS recordId, vector FROM embedding_vectors").all();
   }
@@ -373,17 +400,28 @@ export class CortexStorage {
   putEmbedding(recordId, model, vectorBlob) {
     this.db.prepare("INSERT OR REPLACE INTO embedding_vectors(record_id, model, vector, created_at) VALUES (?, ?, ?, ?)")
       .run(recordId, model, vectorBlob, nowIso());
+    this.embeddingWrites = (this.embeddingWrites || 0) + 1;
   }
 
+  // One row per (record, chunk) that has no vector. chunkIndex is the chunk's position within
+  // its record (rowid order, as the indexer inserted them).
   missingEmbeddingChunks(limit = 256) {
     return this.db.prepare(`
-      SELECT record_id AS recordId, title, body FROM search_chunks
-      WHERE record_id NOT IN (SELECT record_id FROM embedding_vectors) LIMIT ?
+      WITH chunks AS (
+        SELECT record_id, title, body, ROW_NUMBER() OVER (PARTITION BY record_id ORDER BY rowid) - 1 AS chunk_index
+        FROM search_chunks
+      )
+      SELECT record_id AS recordId, chunk_index AS chunkIndex, title, body FROM chunks
+      WHERE (CASE WHEN chunk_index = 0 THEN record_id ELSE record_id || '#' || chunk_index END)
+        NOT IN (SELECT record_id FROM embedding_vectors)
+      LIMIT ?
     `).all(limit);
   }
 
   pruneOrphanEmbeddings() {
-    this.db.prepare("DELETE FROM embedding_vectors WHERE record_id NOT IN (SELECT record_id FROM search_chunks)").run();
+    this.db.prepare(`DELETE FROM embedding_vectors WHERE
+      (CASE WHEN instr(record_id, '#') THEN substr(record_id, 1, instr(record_id, '#') - 1) ELSE record_id END)
+      NOT IN (SELECT record_id FROM search_chunks)`).run();
   }
 
   // Value audit II Phase 1: reviewer/auto-merge outcomes become queryable run columns
